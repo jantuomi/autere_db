@@ -1,15 +1,30 @@
 #[macro_use]
 extern crate log;
+extern crate rev_buf_reader;
+
 pub mod log_db {
     use fs2::FileExt;
     use priority_queue::PriorityQueue;
+    use rev_buf_reader::RevBufReader;
     use std::collections::{BTreeMap, HashSet};
-    use std::fs;
-    use std::io;
-    use std::io::Write;
+    use std::fmt::Debug;
+    use std::fs::{self, metadata, File};
+    use std::io::{self, BufRead, Read, Seek, Write};
     use std::path::{Path, PathBuf};
 
-    const ACTIVE_LOG_FILENAME: &str = "db";
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt; // For Unix-like systems
+
+    #[cfg(windows)]
+    use std::os::windows::fs::MetadataExt; // For Windows
+
+    pub const ACTIVE_LOG_FILENAME: &str = "db";
+    pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
+    pub const FIELD_SEPARATOR: u8 = b'\x1C';
+    pub const ESCAPE_CHARACTER: u8 = b'\x1D';
+    pub const SEQ_RECORD_SEP: &[u8] = &[FIELD_SEPARATOR, FIELD_SEPARATOR, ESCAPE_CHARACTER];
+    pub const SEQ_LIT_ESCAPE: &[u8] = &[ESCAPE_CHARACTER, ESCAPE_CHARACTER, ESCAPE_CHARACTER];
+    pub const SEQ_LIT_FIELD_SEP: &[u8] = &[ESCAPE_CHARACTER, FIELD_SEPARATOR, ESCAPE_CHARACTER];
 
     #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
     pub enum IndexableValue {
@@ -42,55 +57,71 @@ pub mod log_db {
                 }
                 RecordValue::Int(i) => {
                     let mut bytes = vec![1]; // Tag for Int
-                    bytes.extend(&i.to_be_bytes());
+                    let data_bytes = escape_bytes(&i.to_be_bytes());
+                    bytes.extend(&data_bytes);
                     bytes
                 }
                 RecordValue::Float(f) => {
                     let mut bytes = vec![2]; // Tag for Float
-                    bytes.extend(&f.to_be_bytes());
+                    let data_bytes = escape_bytes(&f.to_be_bytes());
+                    bytes.extend(&data_bytes);
                     bytes
                 }
                 RecordValue::String(s) => {
                     let mut bytes = vec![3]; // Tag for String
                     let length = s.len() as u64;
-                    bytes.extend(&length.to_be_bytes());
-                    bytes.extend(s.as_bytes());
+                    let length_bytes = escape_bytes(&length.to_be_bytes());
+                    bytes.extend(&length_bytes);
+                    let data_bytes = escape_bytes(s.as_bytes());
+                    bytes.extend(&data_bytes);
                     bytes
                 }
                 RecordValue::Bytes(b) => {
-                    let mut bytes = vec![3]; // Tag for Bytes
+                    let mut bytes = vec![4]; // Tag for Bytes
                     let length = b.len() as u64;
-                    bytes.extend(&length.to_be_bytes());
-                    bytes.extend(b);
+                    let length_bytes = escape_bytes(&length.to_be_bytes());
+                    bytes.extend(&length_bytes);
+                    let data_bytes = escape_bytes(b);
+                    bytes.extend(&data_bytes);
                     bytes
                 }
             }
         }
 
-        fn deserialize(bytes: &[u8]) -> RecordValue {
+        /// Deserialize a RecordValue from a byte slice.
+        /// Returns the deserialized RecordValue and the number of bytes consumed.
+        fn deserialize(bytes: &[u8]) -> (RecordValue, usize) {
             match bytes[0] {
-                0 => RecordValue::Null,
+                0 => (RecordValue::Null, 1),
                 1 => {
                     let mut int_bytes = [0; 8];
-                    int_bytes.copy_from_slice(&bytes[1..9]);
-                    RecordValue::Int(i64::from_be_bytes(int_bytes))
+                    int_bytes.copy_from_slice(&bytes[1..1 + 8]);
+                    (RecordValue::Int(i64::from_be_bytes(int_bytes)), 1 + 8)
                 }
                 2 => {
                     let mut float_bytes = [0; 8];
-                    float_bytes.copy_from_slice(&bytes[1..9]);
-                    RecordValue::Float(f64::from_be_bytes(float_bytes))
+                    float_bytes.copy_from_slice(&bytes[1..1 + 8]);
+                    (RecordValue::Float(f64::from_be_bytes(float_bytes)), 1 + 8)
                 }
                 3 => {
-                    let length_bytes = &bytes[1..9];
+                    let length_bytes = &bytes[1..1 + 8];
                     let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
-                    RecordValue::String(String::from_utf8(bytes[9..9 + length].to_vec()).unwrap())
+                    (
+                        RecordValue::String(
+                            String::from_utf8(bytes[1 + 8..1 + 8 + length].to_vec()).unwrap(),
+                        ),
+                        1 + 8 + length,
+                    )
                 }
                 4 => {
-                    let length_bytes = &bytes[1..9];
+                    let length_bytes = &bytes[1..1 + 8];
                     let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
-                    RecordValue::Bytes(bytes[9..9 + length].to_vec())
+                    (
+                        RecordValue::Bytes(bytes[1 + 8..1 + 8 + length].to_vec()),
+                        1 + 8 + length,
+                    )
                 }
-                _ => panic!("Invalid tag"),
+                _ => panic!("Invalid tag: {}", bytes[0]),
             }
         }
 
@@ -108,6 +139,27 @@ pub mod log_db {
         pub values: Vec<RecordValue>,
     }
 
+    impl Record {
+        pub fn serialize(&self) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for value in &self.values {
+                bytes.extend(value.serialize());
+            }
+            bytes
+        }
+
+        pub fn deserialize(bytes: &[u8]) -> Record {
+            let mut values = Vec::new();
+            let mut start = 0;
+            while start < bytes.len() {
+                let (rv, consumed) = RecordValue::deserialize(&bytes[start..]);
+                values.push(rv);
+                start += consumed;
+            }
+            Record { values }
+        }
+    }
+
     #[derive(Clone)]
     pub struct Config<Field: Eq + Clone> {
         /// Directory where the database will store its data.
@@ -115,10 +167,10 @@ pub mod log_db {
         /// The maximum size of a segment file in bytes.
         /// Once a segment file reaches this size, it is closed and a new one is created.
         /// Closed segment files can be compacted.
-        pub segment_size: u64,
+        pub segment_size: usize,
         /// The maximum size of a single memtable in bytes.
         /// Note that each secondary index will have its own memtable.
-        pub memtable_size: u64,
+        pub memtable_size: usize,
         /// The field schema of the database.
         pub fields: Vec<(Field, RecordFieldType)>,
         /// The primary key of the database, used to construct
@@ -130,14 +182,14 @@ pub mod log_db {
         pub secondary_keys: Vec<Field>,
     }
 
-    pub struct DB<Field: Eq + Clone> {
+    pub struct DB<Field: Eq + Clone + Debug> {
         config: Config<Field>,
         log_path: PathBuf,
         primary_memtable: BTreeMap<IndexableValue, Record>,
         secondary_memtables: Vec<BTreeMap<IndexableValue, HashSet<Record>>>,
     }
 
-    impl<Field: Eq + Clone> DB<Field> {
+    impl<Field: Eq + Clone + Debug> DB<Field> {
         pub fn initialize(config: &Config<Field>) -> Result<DB<Field>, io::Error> {
             info!("Initializing DB");
             // If data_dir does not exist, create it
@@ -197,6 +249,7 @@ pub mod log_db {
         }
 
         pub fn upsert(&mut self, record: &Record) -> Result<(), io::Error> {
+            debug!("Upserting record: {:?}", record);
             // Validate the record length
             if record.values.len() != self.config.fields.len() {
                 return Err(io::Error::new(
@@ -222,12 +275,15 @@ pub mod log_db {
                             io::ErrorKind::InvalidInput,
                             format!(
                                 "Record field {} has incorrect type: {:?}, expected {:?}",
-                                i, record.values[i], field_type
+                                &i, &record.values[i], &field_type
                             ),
                         ))
                     }
                 }
             }
+
+            debug!("Record is valid");
+            debug!("Opening file in append mode and acquiring exclusive lock...");
 
             // Open the log file in append mode
             let mut file = fs::OpenOptions::new()
@@ -238,21 +294,30 @@ pub mod log_db {
             // Acquire an exclusive lock for writing
             file.lock_exclusive()?;
 
+            if !is_file_same_as_path(&file, &self.log_path)? {
+                // The log file has been rotated, so we must try again
+                debug!("Lock acquired, but the log file has been rotated. Retrying upsert...");
+                file.unlock()?;
+                drop(file);
+                return self.upsert(record);
+            }
+
+            debug!("Lock acquired, appending to log file");
+
             // Write the record to the log
-            // Each serialized row is suffixed with the field separator character
-            let mut serialized = record
-                .values
-                .iter()
-                .flat_map(|field| field.serialize())
-                .collect::<Vec<u8>>();
-            serialized.extend(vec![b'\x1C']);
-            file.write_all(&serialized)?;
+            // Each serialized row is suffixed with the field separator character sequence
+            let mut serialized_record = record.serialize();
+            serialized_record.extend(SEQ_RECORD_SEP);
+            file.write_all(&serialized_record)?;
 
             // Sync to disk
             file.flush()?;
             file.sync_all()?;
 
             file.unlock()?;
+
+            debug!("Record appended to log file, lock released");
+            debug!("Updating memtables");
 
             // Update the primary memtable
             let primary_key_index = self
@@ -272,51 +337,262 @@ pub mod log_db {
                         "Primary key must be an IndexableValue",
                     ))?;
 
-            self.primary_memtable
-                .insert(primary_value.clone(), record.clone());
+            if self.primary_memtable.len() < self.config.memtable_size {
+                // TODO: handle capacity better, remove oldest records
+                debug!(
+                    "Inserting record into primary memtable with key {:?} = {:?}",
+                    &self.config.primary_key, &primary_value,
+                );
+                self.primary_memtable
+                    .insert(primary_value.clone(), record.clone());
+            } else {
+                debug!("Primary memtable is full, not inserting");
+            }
 
             // TODO: Update secondary memtables
 
             Ok(())
         }
 
-        pub fn get(&self, field: Field, key: RecordValue) -> Result<Option<Record>, io::Error> {
-            // If the requested field is the primary key, look up the value in the primary memtable
-            if field == self.config.primary_key {
-                let primary_value = key.as_indexable().ok_or(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Primary key must be an IndexableValue",
-                ))?;
+        pub fn get(
+            &mut self,
+            field: &Field,
+            query_key: &RecordValue,
+        ) -> Result<Option<Record>, io::Error> {
+            let query_key_original = query_key;
+            debug!("Getting record with field {:?} = {:?}", field, query_key);
+            let query_key = query_key_original.as_indexable().ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Queried value must be indexable",
+            ))?;
 
-                let found = self.primary_memtable.get(&primary_value);
+            // If the requested field is the primary key, look up the value in the primary memtable
+            if *field == self.config.primary_key {
+                debug!("Looking up key {:?} in primary memtable", query_key);
+                let found = self.primary_memtable.get(&query_key);
                 if let Some(record) = found {
+                    debug!("Found record in primary memtable: {:?}", record);
                     return Ok(Some(record.clone()));
                 }
             }
 
             // TODO: query secondary memtables
 
+            debug!(
+                "No memtable entry found, looking up key {:?} in log file",
+                query_key
+            );
+
             // Get the index of the requested field
             let key_index = self
                 .config
                 .fields
                 .iter()
-                .position(|(schema_field, _)| schema_field == &field)
+                .position(|(schema_field, _)| schema_field == field)
                 .ok_or(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "Key not found in schema after initialize",
                 ))?;
 
+            debug!("Matching key index {}", key_index);
+            debug!("Opening file in read mode and acquiring shared lock...");
+
             // Open the file and acquire a shared lock for reading
-            let file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
+            let mut file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
             file.lock_shared()?;
 
-            // Do a log file scan from the bottom up to find the record
-            // TODO
+            if !is_file_same_as_path(&file, &self.log_path)? {
+                // The log file has been rotated, so we must try again
+                debug!("Lock acquired, but the log file has been rotated. Retrying get...");
+                file.unlock()?;
+                drop(file);
+                return self.get(field, query_key_original);
+            }
+
+            debug!("Lock acquired, searching log file for record");
+
+            let mut log_reader = LogReader::new(&mut file)?;
+            let result = log_reader.find(|record| {
+                let record_key = record.values[key_index].as_indexable().unwrap();
+                record_key == query_key
+            });
 
             file.unlock()?;
+            debug!("Record search complete, lock released");
 
-            Ok(None)
+            let result_value = match result {
+                Some(record) => record,
+                None => {
+                    debug!("No record found for key {:?}", query_key);
+                    return Ok(None);
+                }
+            };
+
+            debug!("Found matching record in log file");
+
+            if self.primary_memtable.len() < self.config.memtable_size {
+                if *field == self.config.primary_key {
+                    // TODO: handle capacity better, remove oldest records
+                    debug!(
+                        "Inserting record into primary memtable with key {:?} = {:?}",
+                        &field, &query_key,
+                    );
+                    self.primary_memtable
+                        .insert(query_key.clone(), result_value.clone());
+                }
+            } else {
+                debug!("Primary memtable is full, not inserting");
+            }
+
+            Ok(Some(result_value))
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum SpecialSequence {
+        RecordSeparator,
+        LiteralFieldSeparator,
+        LiteralEscape,
+    }
+
+    pub struct LogReader<'a> {
+        rev_reader: RevBufReader<&'a mut fs::File>,
+    }
+
+    impl<'a> LogReader<'a> {
+        pub fn new(file: &mut fs::File) -> Result<LogReader, io::Error> {
+            let rev_reader = RevBufReader::new(file);
+            Ok(LogReader { rev_reader })
+        }
+
+        fn read_record(&mut self) -> Result<Option<Record>, io::Error> {
+            if self.rev_reader.stream_position()? == 0 {
+                return Ok(None);
+            }
+
+            // Check that the record starts with the record separator
+            if self.read_special_sequence()? != SpecialSequence::RecordSeparator {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Record candidate does not end with record separator",
+                ));
+            }
+
+            // The buffer that stores all the bytes of the record read so far in reverse order.
+            let mut result_buf: Vec<u8> = Vec::new();
+            // The buffer that stores the bytes read from the file.
+            let mut read_buf: Vec<u8> = Vec::new();
+
+            loop {
+                read_buf.clear();
+                self.rev_reader
+                    .read_until(ESCAPE_CHARACTER, &mut read_buf)?;
+
+                result_buf.extend(read_buf.iter().rev());
+
+                if self.rev_reader.stream_position()? == 0 {
+                    // If we've reached the beginning of the file, we've read the entire record.
+                    break;
+                }
+
+                // Otherwise, we must have encountered an escape character.
+                match self.read_special_sequence()? {
+                    SpecialSequence::RecordSeparator => {
+                        // The record is complete, so we can break out of the loop.
+                        // Move the cursor back to the beginning of the special sequence.
+                        self.rev_reader.seek_relative(3)?;
+                        break;
+                    }
+                    SpecialSequence::LiteralFieldSeparator => {
+                        // The field separator is escaped, so we need to add it to the result buffer.
+                        result_buf.push(FIELD_SEPARATOR);
+                    }
+                    SpecialSequence::LiteralEscape => {
+                        // The escape character is escaped, so we need to add it to the result buffer.
+                        result_buf.push(ESCAPE_CHARACTER);
+                    }
+                }
+            }
+
+            result_buf.reverse();
+            let record = Record::deserialize(&result_buf);
+            Ok(Some(record))
+        }
+
+        fn read_special_sequence(&mut self) -> Result<SpecialSequence, io::Error> {
+            let mut special_buf: Vec<u8> = vec![0; 3];
+            self.rev_reader.read_exact(&mut special_buf)?;
+
+            match validate_special(&special_buf.as_slice()) {
+                Some(special) => Ok(special),
+                None => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Not a special sequence",
+                )),
+            }
+        }
+    }
+
+    impl Iterator for LogReader<'_> {
+        type Item = Record;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            match self.read_record() {
+                Ok(Some(record)) => Some(record),
+                Ok(None) => None,
+                Err(err) => panic!("Error reading record: {:?}", err),
+            }
+        }
+    }
+
+    /// There are three special characters that need to be handled:
+    /// Here: SC = escape char, FS = field separator.
+    /// - FS FS SC  -> actual record separator
+    /// - SC FS SC  -> literal FS
+    /// - SC SC SC  -> literal SC
+    fn validate_special(buf: &[u8]) -> Option<SpecialSequence> {
+        match buf {
+            SEQ_RECORD_SEP => Some(SpecialSequence::RecordSeparator),
+            SEQ_LIT_FIELD_SEP => Some(SpecialSequence::LiteralFieldSeparator),
+            SEQ_LIT_ESCAPE => Some(SpecialSequence::LiteralEscape),
+            _ => None,
+        }
+    }
+
+    fn escape_bytes(buf: &[u8]) -> Vec<u8> {
+        let mut result = Vec::new();
+        for byte in buf {
+            match byte {
+                &FIELD_SEPARATOR => {
+                    result.extend(SEQ_LIT_FIELD_SEP);
+                }
+                &ESCAPE_CHARACTER => {
+                    result.extend(SEQ_LIT_ESCAPE);
+                }
+                _ => result.push(*byte),
+            }
+        }
+        result
+    }
+
+    fn is_file_same_as_path(file: &File, path: &PathBuf) -> io::Result<bool> {
+        // Get the metadata for the open file handle
+        let file_metadata = file.metadata()?;
+
+        // Get the metadata for the file at the specified path
+        let path_metadata = metadata(path)?;
+
+        // Platform-specific comparison
+        #[cfg(unix)]
+        {
+            Ok(file_metadata.dev() == path_metadata.dev()
+                && file_metadata.ino() == path_metadata.ino())
+        }
+
+        #[cfg(windows)]
+        {
+            Ok(file_metadata.file_index() == path_metadata.file_index()
+                && file_metadata.volume_serial_number() == path_metadata.volume_serial_number())
         }
     }
 }
