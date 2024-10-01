@@ -1,14 +1,12 @@
 use env_logger;
 use log_db;
-use log_db::log_db::{Config, LogReader, Record, RecordFieldType, RecordValue, DB};
+use log_db::log_db::{LogReader, Record, RecordFieldType, RecordValue, DB};
 use serial_test::serial;
 use std::fs;
 use std::path::Path;
 
 const TEST_DATA_DIR: &str = "test_db_data";
 const TEST_RESOURCES_DIR: &str = "tests/resources";
-const TEST_SEGMENT_SIZE: usize = 1024 * 1024; // 1 MB
-const TEST_MEMTABLE_SIZE: usize = 1024 * 1024; // 1 MB
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 enum Field {
@@ -20,19 +18,16 @@ enum Field {
 #[test]
 #[serial]
 fn test_initialize() {
-    let _db = DB::initialize(&Config {
-        data_dir: TEST_DATA_DIR.to_string(),
-        segment_size: TEST_SEGMENT_SIZE,
-        memtable_size: TEST_MEMTABLE_SIZE,
-        fields: vec![
+    let _db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
             (Field::Data, RecordFieldType::Bytes),
-        ],
-        primary_key: Field::Id,
-        secondary_keys: vec![],
-    })
-    .unwrap();
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
 
     // Clean up
     std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
@@ -41,19 +36,16 @@ fn test_initialize() {
 #[test]
 #[serial]
 fn test_upsert_and_get_with_memtable() {
-    let mut db = DB::initialize(&Config {
-        data_dir: TEST_DATA_DIR.to_string(),
-        segment_size: TEST_SEGMENT_SIZE,
-        memtable_size: TEST_MEMTABLE_SIZE,
-        fields: vec![
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
             (Field::Data, RecordFieldType::Bytes),
-        ],
-        primary_key: Field::Id,
-        secondary_keys: vec![],
-    })
-    .unwrap();
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
 
     let record = Record {
         values: vec![
@@ -80,19 +72,17 @@ fn test_upsert_and_get_with_memtable() {
 #[serial]
 fn test_upsert_and_get_without_memtable() {
     let _ = env_logger::builder().is_test(true).try_init();
-    let mut db = DB::initialize(&Config {
-        data_dir: TEST_DATA_DIR.to_string(),
-        segment_size: TEST_SEGMENT_SIZE,
-        memtable_size: 0, // Force log reads
-        fields: vec![
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .memtable_capacity(0)
+        .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
             (Field::Data, RecordFieldType::Bytes),
-        ],
-        primary_key: Field::Id,
-        secondary_keys: vec![],
-    })
-    .unwrap();
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
 
     // Insert some records
     let record0 = Record {
@@ -164,19 +154,16 @@ fn test_upsert_and_get_without_memtable() {
 #[test]
 #[serial]
 fn test_upsert_fails_on_invalid_number_of_values() {
-    let mut db = DB::initialize(&Config {
-        data_dir: TEST_DATA_DIR.to_string(),
-        segment_size: TEST_SEGMENT_SIZE,
-        memtable_size: TEST_MEMTABLE_SIZE,
-        fields: vec![
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
             (Field::Data, RecordFieldType::Bytes),
-        ],
-        primary_key: Field::Id,
-        secondary_keys: vec![],
-    })
-    .unwrap();
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
 
     let record = Record {
         // Missing primary key
@@ -194,19 +181,16 @@ fn test_upsert_fails_on_invalid_number_of_values() {
 #[test]
 #[serial]
 fn test_upsert_fails_on_invalid_value_type() {
-    let mut db = DB::initialize(&Config {
-        data_dir: TEST_DATA_DIR.to_string(),
-        segment_size: TEST_SEGMENT_SIZE,
-        memtable_size: TEST_MEMTABLE_SIZE,
-        fields: vec![
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
             (Field::Data, RecordFieldType::Bytes),
-        ],
-        primary_key: Field::Id,
-        secondary_keys: vec![],
-    })
-    .unwrap();
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
 
     let record = Record {
         values: vec![

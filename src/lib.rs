@@ -7,6 +7,7 @@ pub mod log_db {
     use priority_queue::PriorityQueue;
     use rev_buf_reader::RevBufReader;
     use std::collections::{BTreeMap, HashSet};
+    use std::error::Error;
     use std::fmt::Debug;
     use std::fs::{self, metadata, File};
     use std::io::{self, BufRead, Read, Seek, Write};
@@ -160,26 +161,125 @@ pub mod log_db {
         }
     }
 
-    #[derive(Clone)]
-    pub struct Config<Field: Eq + Clone> {
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    pub enum MemtableEvictPolicy {
+        LeastWritten,
+        LeastRead,
+        LeastReadOrWritten,
+    }
+
+    pub struct ConfigBuilder<'a, Field: Eq + Clone + Debug> {
+        data_dir: Option<String>,
+        segment_size: Option<usize>,
+        memtable_capacity: Option<usize>,
+        fields: Option<&'a Vec<(Field, RecordFieldType)>>,
+        primary_key: Option<Field>,
+        secondary_keys: Option<Vec<Field>>,
+        memtable_evict_policy: Option<MemtableEvictPolicy>,
+    }
+
+    impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
+        pub fn new() -> ConfigBuilder<'a, Field> {
+            ConfigBuilder::<Field> {
+                data_dir: None,
+                segment_size: None,
+                memtable_capacity: None,
+                fields: None,
+                primary_key: None,
+                secondary_keys: None,
+                memtable_evict_policy: None,
+            }
+        }
+
         /// Directory where the database will store its data.
-        pub data_dir: String,
+        pub fn data_dir(&mut self, data_dir: &str) -> &mut Self {
+            self.data_dir = Some(data_dir.to_string());
+            self
+        }
+
         /// The maximum size of a segment file in bytes.
         /// Once a segment file reaches this size, it is closed and a new one is created.
         /// Closed segment files can be compacted.
-        pub segment_size: usize,
-        /// The maximum size of a single memtable in bytes.
+        pub fn segment_size(&mut self, segment_size: usize) -> &mut Self {
+            self.segment_size = Some(segment_size);
+            self
+        }
+
+        /// The maximum size of a single memtable in terms of records.
         /// Note that each secondary index will have its own memtable.
-        pub memtable_size: usize,
+        pub fn memtable_capacity(&mut self, memtable_capacity: usize) -> &mut Self {
+            self.memtable_capacity = Some(memtable_capacity);
+            self
+        }
+
         /// The field schema of the database.
-        pub fields: Vec<(Field, RecordFieldType)>,
+        pub fn fields(&mut self, fields: &'a Vec<(Field, RecordFieldType)>) -> &mut Self {
+            self.fields = Some(fields);
+            self
+        }
+
         /// The primary key of the database, used to construct
         /// the primary memtable index. This should be the field
         /// that is most frequently queried.
-        pub primary_key: Field,
+        pub fn primary_key(&mut self, primary_key: Field) -> &mut Self {
+            self.primary_key = Some(primary_key);
+            self
+        }
+
         /// The secondary keys of the database, used to construct
         /// the secondary memtable indexes.
+        pub fn secondary_keys(&mut self, secondary_keys: Vec<Field>) -> &mut Self {
+            self.secondary_keys = Some(secondary_keys);
+            self
+        }
+
+        /// The eviction policy for the memtables. Determines which
+        /// record will be dropped from a memtable when it reaches
+        /// capacity.
+        pub fn memtable_evict_policy(
+            &mut self,
+            memtable_evict_policy: MemtableEvictPolicy,
+        ) -> &mut Self {
+            self.memtable_evict_policy = Some(memtable_evict_policy);
+            self
+        }
+
+        pub fn initialize(&self) -> Result<DB<Field>, io::Error> {
+            let config = Config::<Field> {
+                data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
+                segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
+                memtable_capacity: self.memtable_capacity.unwrap_or(1_000_000),
+                fields: self
+                    .fields
+                    .ok_or(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Required config value \"fields\" is not set",
+                    ))?
+                    .clone(),
+                primary_key: self.primary_key.clone().ok_or(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Required config value \"primary_key\" is not set",
+                ))?,
+                secondary_keys: self.secondary_keys.clone().unwrap_or(Vec::new()),
+                memtable_evict_policy: self
+                    .memtable_evict_policy
+                    .clone()
+                    .unwrap_or(MemtableEvictPolicy::LeastReadOrWritten),
+            };
+
+            DB::initialize(&config)
+        }
+    }
+
+    #[derive(Clone)]
+    struct Config<Field: Eq + Clone> {
+        pub data_dir: String,
+        pub segment_size: usize,
+        pub memtable_capacity: usize,
+        pub fields: Vec<(Field, RecordFieldType)>,
+        pub primary_key: Field,
         pub secondary_keys: Vec<Field>,
+        pub memtable_evict_policy: MemtableEvictPolicy,
     }
 
     pub struct DB<Field: Eq + Clone + Debug> {
@@ -190,7 +290,12 @@ pub mod log_db {
     }
 
     impl<Field: Eq + Clone + Debug> DB<Field> {
-        pub fn initialize(config: &Config<Field>) -> Result<DB<Field>, io::Error> {
+        /// Create a new database configuration builder.
+        pub fn configure() -> ConfigBuilder<'static, Field> {
+            ConfigBuilder::new()
+        }
+
+        fn initialize(config: &Config<Field>) -> Result<DB<Field>, io::Error> {
             info!("Initializing DB");
             // If data_dir does not exist, create it
             if !fs::exists(&config.data_dir)? {
@@ -337,7 +442,7 @@ pub mod log_db {
                         "Primary key must be an IndexableValue",
                     ))?;
 
-            if self.primary_memtable.len() < self.config.memtable_size {
+            if self.primary_memtable.len() < self.config.memtable_capacity {
                 // TODO: handle capacity better, remove oldest records
                 debug!(
                     "Inserting record into primary memtable with key {:?} = {:?}",
@@ -430,7 +535,7 @@ pub mod log_db {
 
             debug!("Found matching record in log file");
 
-            if self.primary_memtable.len() < self.config.memtable_size {
+            if self.primary_memtable.len() < self.config.memtable_capacity {
                 if *field == self.config.primary_key {
                     // TODO: handle capacity better, remove oldest records
                     debug!(
