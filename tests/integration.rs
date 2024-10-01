@@ -1,6 +1,6 @@
 use env_logger;
 use log_db;
-use log_db::log_db::{LogReader, Record, RecordFieldType, RecordValue, DB};
+use log_db::{LogReader, Record, RecordFieldType, RecordValue, DB};
 use serial_test::serial;
 use std::fs;
 use std::path::Path;
