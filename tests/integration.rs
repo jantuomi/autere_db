@@ -231,3 +231,61 @@ fn test_log_reader_fixture_db1() {
         _ => false,
     });
 }
+
+#[test]
+#[serial]
+fn test_upsert_and_get_from_secondary_memtable() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![
+            (Field::Id, RecordFieldType::Int),
+            (Field::Name, RecordFieldType::String),
+            (Field::Data, RecordFieldType::Bytes),
+        ])
+        .primary_key(Field::Id)
+        .secondary_keys(vec![Field::Name])
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some records
+    let record0 = Record {
+        values: vec![
+            RecordValue::Int(0),
+            RecordValue::String("John".to_string()),
+            RecordValue::Bytes(vec![3, 4, 5]),
+        ],
+    };
+    db.upsert(&record0).unwrap();
+
+    let record1 = Record {
+        values: vec![
+            RecordValue::Int(1),
+            RecordValue::String("John".to_string()),
+            RecordValue::Bytes(vec![1, 2, 3]),
+        ],
+    };
+    db.upsert(&record1).unwrap();
+
+    let record2 = Record {
+        values: vec![
+            RecordValue::Int(2),
+            RecordValue::String("George".to_string()),
+            RecordValue::Bytes(vec![1, 2, 3]),
+        ],
+    };
+    db.upsert(&record2).unwrap();
+
+    // Delete the DB so that any results must come from a memtable
+    fs::remove_file(Path::new(TEST_DATA_DIR).join("db")).expect("Failed to delete the DB log file");
+
+    // There should be 2 Johns
+    let johns = db
+        .find_all(&Field::Name, &RecordValue::String("John".to_string()))
+        .expect("Failed to find all Johns");
+
+    assert_eq!(johns.len(), 2);
+
+    // Clean up
+    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+}

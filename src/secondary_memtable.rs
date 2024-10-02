@@ -85,9 +85,14 @@ impl<Field: Eq + Clone + Debug> SecondaryMemtable<Field> {
 
         match self.records.get_mut(key) {
             Some(existing) => {
+                debug!(
+                    "Existing entry found with {} records in the set",
+                    &existing.len()
+                );
                 existing.insert(unique_record);
             }
             None => {
+                debug!("No existing entry found, creating one.");
                 let mut set = HashSet::with_capacity(1);
                 set.insert(unique_record);
                 self.records.insert(key.clone(), set);

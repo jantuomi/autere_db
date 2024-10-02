@@ -224,6 +224,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(db)
     }
 
+    /// Insert a record into the database. If the primary key value already exists,
+    /// the existing record will be replaced by the supplied one.
     pub fn upsert(&mut self, record: &Record) -> Result<(), io::Error> {
         debug!("Upserting record: {:?}", record);
         // Validate the record length
@@ -293,7 +295,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         file.unlock()?;
 
         debug!("Record appended to log file, lock released");
-        debug!("Updating memtables");
+        debug!("Updating primary memtable");
 
         let primary_value =
             &record.values[self.primary_key_index]
@@ -308,6 +310,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         self.secondary_memtables
             .iter_mut()
             .for_each(|secondary_memtable| {
+                debug!(
+                    "Updating memtable for index on {:?}",
+                    &secondary_memtable.field
+                );
                 for (index, (schema_field, _)) in self.config.fields.iter().enumerate() {
                     if schema_field == &secondary_memtable.field {
                         let key = record.values[index]
