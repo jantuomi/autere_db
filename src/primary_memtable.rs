@@ -1,10 +1,8 @@
 use super::common::*;
 use priority_queue::PriorityQueue;
 use std::collections::BTreeMap;
-use std::fmt::Debug;
 
-pub struct PrimaryMemtable<Field: Eq + Clone + Debug> {
-    pub field: Field,
+pub struct PrimaryMemtable {
     capacity: usize,
     /// Running counter of memtable operations, used as priority
     /// in evict_queue.
@@ -16,14 +14,9 @@ pub struct PrimaryMemtable<Field: Eq + Clone + Debug> {
     evict_policy: MemtableEvictPolicy,
 }
 
-impl<Field: Eq + Clone + Debug> PrimaryMemtable<Field> {
-    pub fn new(
-        field: &Field,
-        capacity: usize,
-        evict_policy: MemtableEvictPolicy,
-    ) -> PrimaryMemtable<Field> {
+impl PrimaryMemtable {
+    pub fn new(capacity: usize, evict_policy: MemtableEvictPolicy) -> PrimaryMemtable {
         PrimaryMemtable {
-            field: field.clone(),
             capacity,
             n_operations: 0,
             records: BTreeMap::new(),

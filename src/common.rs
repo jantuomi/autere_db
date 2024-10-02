@@ -16,6 +16,13 @@ pub const SEQ_RECORD_SEP: &[u8] = &[FIELD_SEPARATOR, FIELD_SEPARATOR, ESCAPE_CHA
 pub const SEQ_LIT_ESCAPE: &[u8] = &[ESCAPE_CHARACTER, ESCAPE_CHARACTER, ESCAPE_CHARACTER];
 pub const SEQ_LIT_FIELD_SEP: &[u8] = &[ESCAPE_CHARACTER, FIELD_SEPARATOR, ESCAPE_CHARACTER];
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum SpecialSequence {
+    RecordSeparator,
+    LiteralFieldSeparator,
+    LiteralEscape,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum MemtableEvictPolicy {
     LeastWritten,
