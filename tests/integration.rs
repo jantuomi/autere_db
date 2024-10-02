@@ -56,7 +56,7 @@ fn test_upsert_and_get_with_memtable() {
     };
     db.upsert(&record).unwrap();
 
-    let result = db.get(&Field::Id, &RecordValue::Int(1)).unwrap().unwrap();
+    let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
 
     // Check that the IDs match
     assert!(match (&result.values[0], &record.values[0]) {
@@ -122,7 +122,7 @@ fn test_upsert_and_get_without_memtable() {
     db.upsert(&record3).unwrap();
 
     // Get with ID = 0
-    let result = db.get(&Field::Id, &RecordValue::Int(0)).unwrap().unwrap();
+    let result = db.get(&RecordValue::Int(0)).unwrap().unwrap();
 
     // Should match record0
     assert!(match (&result.values[0], &record0.values[0]) {
@@ -135,7 +135,7 @@ fn test_upsert_and_get_without_memtable() {
     });
 
     // Get with ID = 1
-    let result = db.get(&Field::Id, &RecordValue::Int(1)).unwrap().unwrap();
+    let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
 
     // Should match record2
     assert!(match (&result.values[0], &record2.values[0]) {

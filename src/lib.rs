@@ -2,169 +2,19 @@
 extern crate log;
 extern crate rev_buf_reader;
 
+mod common;
+mod primary_memtable;
+mod secondary_memtable;
+
+pub use common::*;
 use fs2::FileExt;
-use priority_queue::PriorityQueue;
+use primary_memtable::PrimaryMemtable;
 use rev_buf_reader::RevBufReader;
-use std::collections::{BTreeMap, HashSet};
+use secondary_memtable::SecondaryMemtable;
 use std::fmt::Debug;
-use std::fs::{self, metadata, File};
+use std::fs::{self};
 use std::io::{self, BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt; // For Unix-like systems
-
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt; // For Windows
-
-pub const ACTIVE_LOG_FILENAME: &str = "db";
-pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
-pub const FIELD_SEPARATOR: u8 = b'\x1C';
-pub const ESCAPE_CHARACTER: u8 = b'\x1D';
-pub const SEQ_RECORD_SEP: &[u8] = &[FIELD_SEPARATOR, FIELD_SEPARATOR, ESCAPE_CHARACTER];
-pub const SEQ_LIT_ESCAPE: &[u8] = &[ESCAPE_CHARACTER, ESCAPE_CHARACTER, ESCAPE_CHARACTER];
-pub const SEQ_LIT_FIELD_SEP: &[u8] = &[ESCAPE_CHARACTER, FIELD_SEPARATOR, ESCAPE_CHARACTER];
-
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub enum IndexableValue {
-    Int(i64),
-    String(String),
-}
-
-#[derive(Debug, Clone)]
-pub enum RecordFieldType {
-    Int,
-    Float,
-    String,
-    Bytes,
-}
-
-#[derive(Debug, Clone)]
-pub enum RecordValue {
-    Null,
-    Int(i64),
-    Float(f64),
-    String(String),
-    Bytes(Vec<u8>),
-}
-
-impl RecordValue {
-    fn serialize(&self) -> Vec<u8> {
-        match self {
-            RecordValue::Null => {
-                vec![0] // Tag for Null
-            }
-            RecordValue::Int(i) => {
-                let mut bytes = vec![1]; // Tag for Int
-                let data_bytes = escape_bytes(&i.to_be_bytes());
-                bytes.extend(&data_bytes);
-                bytes
-            }
-            RecordValue::Float(f) => {
-                let mut bytes = vec![2]; // Tag for Float
-                let data_bytes = escape_bytes(&f.to_be_bytes());
-                bytes.extend(&data_bytes);
-                bytes
-            }
-            RecordValue::String(s) => {
-                let mut bytes = vec![3]; // Tag for String
-                let length = s.len() as u64;
-                let length_bytes = escape_bytes(&length.to_be_bytes());
-                bytes.extend(&length_bytes);
-                let data_bytes = escape_bytes(s.as_bytes());
-                bytes.extend(&data_bytes);
-                bytes
-            }
-            RecordValue::Bytes(b) => {
-                let mut bytes = vec![4]; // Tag for Bytes
-                let length = b.len() as u64;
-                let length_bytes = escape_bytes(&length.to_be_bytes());
-                bytes.extend(&length_bytes);
-                let data_bytes = escape_bytes(b);
-                bytes.extend(&data_bytes);
-                bytes
-            }
-        }
-    }
-
-    /// Deserialize a RecordValue from a byte slice.
-    /// Returns the deserialized RecordValue and the number of bytes consumed.
-    fn deserialize(bytes: &[u8]) -> (RecordValue, usize) {
-        match bytes[0] {
-            0 => (RecordValue::Null, 1),
-            1 => {
-                let mut int_bytes = [0; 8];
-                int_bytes.copy_from_slice(&bytes[1..1 + 8]);
-                (RecordValue::Int(i64::from_be_bytes(int_bytes)), 1 + 8)
-            }
-            2 => {
-                let mut float_bytes = [0; 8];
-                float_bytes.copy_from_slice(&bytes[1..1 + 8]);
-                (RecordValue::Float(f64::from_be_bytes(float_bytes)), 1 + 8)
-            }
-            3 => {
-                let length_bytes = &bytes[1..1 + 8];
-                let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
-                (
-                    RecordValue::String(
-                        String::from_utf8(bytes[1 + 8..1 + 8 + length].to_vec()).unwrap(),
-                    ),
-                    1 + 8 + length,
-                )
-            }
-            4 => {
-                let length_bytes = &bytes[1..1 + 8];
-                let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
-                (
-                    RecordValue::Bytes(bytes[1 + 8..1 + 8 + length].to_vec()),
-                    1 + 8 + length,
-                )
-            }
-            _ => panic!("Invalid tag: {}", bytes[0]),
-        }
-    }
-
-    fn as_indexable(&self) -> Option<IndexableValue> {
-        match self {
-            RecordValue::Int(i) => Some(IndexableValue::Int(*i)),
-            RecordValue::String(s) => Some(IndexableValue::String(s.clone())),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Record {
-    pub values: Vec<RecordValue>,
-}
-
-impl Record {
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for value in &self.values {
-            bytes.extend(value.serialize());
-        }
-        bytes
-    }
-
-    pub fn deserialize(bytes: &[u8]) -> Record {
-        let mut values = Vec::new();
-        let mut start = 0;
-        while start < bytes.len() {
-            let (rv, consumed) = RecordValue::deserialize(&bytes[start..]);
-            values.push(rv);
-            start += consumed;
-        }
-        Record { values }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum MemtableEvictPolicy {
-    LeastWritten,
-    LeastRead,
-    LeastReadOrWritten,
-}
 
 pub struct ConfigBuilder<'a, Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
@@ -287,99 +137,12 @@ trait Memtable<Field: Eq + Clone + Debug, T: Debug> {
     fn get(&mut self, key: &IndexableValue) -> Option<&T>;
 }
 
-struct SimpleMemtable<Field: Eq + Clone + Debug, T: Clone + Debug> {
-    field: Field,
-    capacity: usize,
-    /// Running counter of memtable operations, used as priority
-    /// in evict_queue.
-    n_operations: u64,
-    records: BTreeMap<IndexableValue, T>,
-    /// A max heap priority queue of keys. Note: n_operations must
-    /// be negated upon append to evict oldest values first.
-    evict_queue: PriorityQueue<IndexableValue, i64>,
-    evict_policy: MemtableEvictPolicy,
-}
-
-impl<Field: Eq + Clone + Debug, T: Clone + Debug> Memtable<Field, T> for SimpleMemtable<Field, T> {
-    fn field(&self) -> &Field {
-        &self.field
-    }
-
-    fn new(
-        field: &Field,
-        capacity: usize,
-        evict_policy: MemtableEvictPolicy,
-    ) -> SimpleMemtable<Field, T> {
-        SimpleMemtable {
-            field: field.clone(),
-            capacity,
-            n_operations: 0,
-            records: BTreeMap::new(),
-            evict_queue: PriorityQueue::new(),
-            evict_policy,
-        }
-    }
-
-    fn set(&mut self, key: &IndexableValue, value: &T) {
-        if self.capacity == 0 {
-            return;
-        }
-
-        debug!(
-            "Inserting/updating record in primary memtable with key {:?} = {:?}",
-            &key, &value,
-        );
-
-        if self.records.len() >= self.capacity {
-            let (evict_key, _prio) = self.evict_queue.pop().expect("Evict queue was empty");
-            self.records.remove(&evict_key);
-        }
-
-        self.records.insert(key.clone(), value.clone());
-
-        if self.evict_policy == MemtableEvictPolicy::LeastWritten
-            || self.evict_policy == MemtableEvictPolicy::LeastReadOrWritten
-        {
-            self.set_priority(&key);
-        }
-    }
-
-    fn get(&mut self, key: &IndexableValue) -> Option<&T> {
-        if self.evict_policy == MemtableEvictPolicy::LeastRead
-            || self.evict_policy == MemtableEvictPolicy::LeastReadOrWritten
-        {
-            self.set_priority(&key);
-        }
-
-        self.records.get(key)
-    }
-}
-
-impl<Field: Eq + Clone + Debug, T: Clone + Debug> SimpleMemtable<Field, T> {
-    fn set_priority(&mut self, key: &IndexableValue) {
-        let priority = self.get_and_increment_current_priority();
-        match self.evict_queue.get(key) {
-            Some(_) => {
-                self.evict_queue.change_priority(key, priority);
-            }
-            None => {
-                self.evict_queue.push(key.clone(), priority);
-            }
-        }
-    }
-
-    fn get_and_increment_current_priority(&mut self) -> i64 {
-        let ret = -(self.n_operations as i64);
-        self.n_operations += 1;
-        ret
-    }
-}
-
 pub struct DB<Field: Eq + Clone + Debug> {
     config: Config<Field>,
     log_path: PathBuf,
-    primary_memtable: SimpleMemtable<Field, Record>,
-    secondary_memtables: Vec<SimpleMemtable<Field, HashSet<Record>>>,
+    primary_key_index: usize,
+    primary_memtable: PrimaryMemtable<Field>,
+    secondary_memtables: Vec<SecondaryMemtable<Field>>,
 }
 
 impl<Field: Eq + Clone + Debug> DB<Field> {
@@ -402,6 +165,16 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .create(true)
             .append(true)
             .open(&log_path)?;
+
+        // Calculate the index of the primary value in a record
+        let primary_key_index = config
+            .fields
+            .iter()
+            .position(|(field, _)| field == &config.primary_key)
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Primary key not found in schema after initialize",
+            ))?;
 
         // Join primary key and secondary keys vec into a single vec
         let mut all_keys = vec![&config.primary_key];
@@ -430,7 +203,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 }
             }
         }
-        let primary_memtable = SimpleMemtable::new(
+        let primary_memtable = PrimaryMemtable::new(
             &config.primary_key,
             config.memtable_capacity,
             config.memtable_evict_policy.clone(),
@@ -439,8 +212,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .secondary_keys
             .iter()
             .map(|key| {
-                SimpleMemtable::new(
+                SecondaryMemtable::new(
                     key,
+                    primary_key_index,
                     config.memtable_capacity,
                     config.memtable_evict_policy.clone(),
                 )
@@ -450,6 +224,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let db = DB::<Field> {
             config: config.clone(),
             log_path,
+            primary_key_index,
             primary_memtable,
             secondary_memtables,
         };
@@ -527,18 +302,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Record appended to log file, lock released");
         debug!("Updating memtables");
 
-        // Update the primary memtable
-        let primary_key_index = self
-            .config
-            .fields
-            .iter()
-            .position(|(field, _)| field == &self.config.primary_key)
-            .ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Primary key not found in schema after initialize",
-            ))?;
         let primary_value =
-            &record.values[primary_key_index]
+            &record.values[self.primary_key_index]
                 .as_indexable()
                 .ok_or(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -547,34 +312,133 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         self.primary_memtable.set(primary_value, record);
 
-        // TODO: Update secondary memtables
+        self.secondary_memtables
+            .iter_mut()
+            .for_each(|secondary_memtable| {
+                for (index, (schema_field, _)) in self.config.fields.iter().enumerate() {
+                    if schema_field == &secondary_memtable.field {
+                        let key = record.values[index]
+                            .as_indexable()
+                            .expect("Secondary index key was not indexable");
+                        secondary_memtable.set(&key, record);
+                    }
+                }
+            });
 
         Ok(())
     }
 
-    pub fn get(
-        &mut self,
-        field: &Field,
-        query_key: &RecordValue,
-    ) -> Result<Option<Record>, io::Error> {
+    /// Get a record by its primary index value.
+    /// E.g. `db.get(RecordValue::Int(10))`.
+    pub fn get(&mut self, query_key: &RecordValue) -> Result<Option<Record>, io::Error> {
         let query_key_original = query_key;
-        debug!("Getting record with field {:?} = {:?}", field, query_key);
+        debug!(
+            "Getting record with field {:?} = {:?}",
+            &self.config.primary_key, query_key
+        );
         let query_key = query_key_original.as_indexable().ok_or(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Queried value must be indexable",
         ))?;
 
-        // If the requested field is the primary key, look up the value in the primary memtable
-        if *field == self.config.primary_key {
-            debug!("Looking up key {:?} in primary memtable", query_key);
-            let found = self.primary_memtable.get(&query_key);
-            if let Some(record) = found {
-                debug!("Found record in primary memtable: {:?}", record);
-                return Ok(Some(record.clone()));
-            }
+        debug!("Looking up key {:?} in primary memtable", query_key);
+        let found = self.primary_memtable.get(&query_key);
+        if let Some(record) = found {
+            debug!("Found record in primary memtable: {:?}", record);
+            return Ok(Some(record.clone()));
         }
 
-        // TODO: query secondary memtables
+        debug!(
+            "No memtable entry found, looking up key {:?} in log file",
+            query_key
+        );
+
+        debug!(
+            "Matching records based on value at primary key index ({})",
+            &self.primary_key_index
+        );
+        debug!("Opening file in read mode and acquiring shared lock...");
+
+        // Open the file and acquire a shared lock for reading
+        let mut file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
+        file.lock_shared()?;
+
+        if !is_file_same_as_path(&file, &self.log_path)? {
+            // The log file has been rotated, so we must try again
+            debug!("Lock acquired, but the log file has been rotated. Retrying get...");
+            file.unlock()?;
+            drop(file);
+            return self.get(query_key_original);
+        }
+
+        debug!("Lock acquired, searching log file for record");
+
+        let mut log_reader = LogReader::new(&mut file)?;
+        let result = log_reader.find(|record| {
+            let record_key = record.values[self.primary_key_index]
+                .as_indexable()
+                .expect("A non-indexable value was stored at key index");
+            record_key == query_key
+        });
+
+        file.unlock()?;
+        debug!("Record search complete, lock released");
+
+        let result_value = match result {
+            Some(record) => record,
+            None => {
+                debug!("No record found for key {:?}", query_key);
+                return Ok(None);
+            }
+        };
+
+        debug!("Found matching record in log file. Storing result in primary memtable.");
+        self.primary_memtable.set(&query_key, &result_value);
+
+        Ok(Some(result_value))
+    }
+
+    /// Get a collection of records based on a field value.
+    /// Indexes will be used if they contain the requested key.
+    pub fn find_all(
+        &mut self,
+        field: &Field,
+        query_key: &RecordValue,
+    ) -> Result<Vec<Record>, io::Error> {
+        // If querying by primary key, return the result of `get` wrapped in a vec.
+        if field == &self.config.primary_key {
+            return match self.get(query_key)? {
+                Some(record) => Ok(vec![record.clone()]),
+                None => Ok(vec![]),
+            };
+        }
+
+        // Otherwise, continue with querying secondary indexes.
+        let query_key_original = query_key;
+        debug!(
+            "Finding all records with field {:?} = {:?}",
+            field, query_key
+        );
+        let query_key = query_key_original.as_indexable().ok_or(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Queried value must be indexable",
+        ))?;
+
+        // Try to find a memtable with the queried key
+        let found_memtable = self
+            .secondary_memtables
+            .iter_mut()
+            .find(|mt| &mt.field == field);
+
+        if let Some(memtable) = found_memtable {
+            debug!(
+                "Found suitable secondary index. Looking up key {:?} in the memtable",
+                query_key
+            );
+            let records = memtable.find_all(&query_key);
+            debug!("Found matching key");
+            return Ok(records.iter().map(|&record| record.clone()).collect());
+        }
 
         debug!(
             "No memtable entry found, looking up key {:?} in log file",
@@ -601,40 +465,38 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         if !is_file_same_as_path(&file, &self.log_path)? {
             // The log file has been rotated, so we must try again
-            debug!("Lock acquired, but the log file has been rotated. Retrying get...");
+            debug!("Lock acquired, but the log file has been rotated. Retrying find_all...");
             file.unlock()?;
             drop(file);
-            return self.get(field, query_key_original);
+            return self.find_all(field, query_key_original);
         }
 
         debug!("Lock acquired, searching log file for record");
 
         let mut log_reader = LogReader::new(&mut file)?;
-        let result = log_reader.find(|record| {
-            let record_key = record.values[key_index]
-                .as_indexable()
-                .expect("A non-indexable value was stored at key index");
-            record_key == query_key
-        });
+        let result = log_reader
+            .filter(|record| {
+                let record_key = record.values[key_index]
+                    .as_indexable()
+                    .expect("A non-indexable value was stored at key index");
+                record_key == query_key
+            })
+            .collect::<Vec<Record>>();
 
         file.unlock()?;
         debug!("Record search complete, lock released");
 
-        let result_value = match result {
-            Some(record) => record,
-            None => {
-                debug!("No record found for key {:?}", query_key);
-                return Ok(None);
-            }
-        };
+        debug!(
+            "Number of matching records found in log file: {}",
+            result.len()
+        );
 
-        debug!("Found matching record in log file");
-
-        if *field == self.config.primary_key {
-            self.primary_memtable.set(&query_key, &result_value);
+        if let Some(memtable) = found_memtable {
+            debug!("Inserting result set into secondary index");
+            memtable.set_all(&query_key, &result);
         }
 
-        Ok(Some(result_value))
+        Ok(result)
     }
 }
 
@@ -746,44 +608,5 @@ fn validate_special(buf: &[u8]) -> Option<SpecialSequence> {
         SEQ_LIT_FIELD_SEP => Some(SpecialSequence::LiteralFieldSeparator),
         SEQ_LIT_ESCAPE => Some(SpecialSequence::LiteralEscape),
         _ => None,
-    }
-}
-
-fn escape_bytes(buf: &[u8]) -> Vec<u8> {
-    let mut result = Vec::new();
-    for byte in buf {
-        match byte {
-            &FIELD_SEPARATOR => {
-                result.extend(SEQ_LIT_FIELD_SEP);
-            }
-            &ESCAPE_CHARACTER => {
-                result.extend(SEQ_LIT_ESCAPE);
-            }
-            _ => result.push(*byte),
-        }
-    }
-    result
-}
-
-fn is_file_same_as_path(file: &File, path: &PathBuf) -> io::Result<bool> {
-    // Get the metadata for the open file handle
-    let file_metadata = file.metadata()?;
-
-    // Get the metadata for the file at the specified path
-    let path_metadata = metadata(path)?;
-
-    // Platform-specific comparison
-    #[cfg(unix)]
-    {
-        Ok(
-            file_metadata.dev() == path_metadata.dev()
-                && file_metadata.ino() == path_metadata.ino(),
-        )
-    }
-
-    #[cfg(windows)]
-    {
-        Ok(file_metadata.file_index() == path_metadata.file_index()
-            && file_metadata.volume_serial_number() == path_metadata.volume_serial_number())
     }
 }
