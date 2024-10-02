@@ -25,7 +25,7 @@ pub const SEQ_RECORD_SEP: &[u8] = &[FIELD_SEPARATOR, FIELD_SEPARATOR, ESCAPE_CHA
 pub const SEQ_LIT_ESCAPE: &[u8] = &[ESCAPE_CHARACTER, ESCAPE_CHARACTER, ESCAPE_CHARACTER];
 pub const SEQ_LIT_FIELD_SEP: &[u8] = &[ESCAPE_CHARACTER, FIELD_SEPARATOR, ESCAPE_CHARACTER];
 
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum IndexableValue {
     Int(i64),
     String(String),
@@ -280,11 +280,106 @@ struct Config<Field: Eq + Clone> {
     pub memtable_evict_policy: MemtableEvictPolicy,
 }
 
+trait Memtable<Field: Eq + Clone + Debug, T: Debug> {
+    fn field(&self) -> &Field;
+    fn new(field: &Field, capacity: usize, evict_policy: MemtableEvictPolicy) -> Self;
+    fn set(&mut self, key: &IndexableValue, value: &T);
+    fn get(&mut self, key: &IndexableValue) -> Option<&T>;
+}
+
+struct SimpleMemtable<Field: Eq + Clone + Debug, T: Clone + Debug> {
+    field: Field,
+    capacity: usize,
+    /// Running counter of memtable operations, used as priority
+    /// in evict_queue.
+    n_operations: u64,
+    records: BTreeMap<IndexableValue, T>,
+    /// A max heap priority queue of keys. Note: n_operations must
+    /// be negated upon append to evict oldest values first.
+    evict_queue: PriorityQueue<IndexableValue, i64>,
+    evict_policy: MemtableEvictPolicy,
+}
+
+impl<Field: Eq + Clone + Debug, T: Clone + Debug> Memtable<Field, T> for SimpleMemtable<Field, T> {
+    fn field(&self) -> &Field {
+        &self.field
+    }
+
+    fn new(
+        field: &Field,
+        capacity: usize,
+        evict_policy: MemtableEvictPolicy,
+    ) -> SimpleMemtable<Field, T> {
+        SimpleMemtable {
+            field: field.clone(),
+            capacity,
+            n_operations: 0,
+            records: BTreeMap::new(),
+            evict_queue: PriorityQueue::new(),
+            evict_policy,
+        }
+    }
+
+    fn set(&mut self, key: &IndexableValue, value: &T) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        debug!(
+            "Inserting/updating record in primary memtable with key {:?} = {:?}",
+            &key, &value,
+        );
+
+        if self.records.len() >= self.capacity {
+            let (evict_key, _prio) = self.evict_queue.pop().expect("Evict queue was empty");
+            self.records.remove(&evict_key);
+        }
+
+        self.records.insert(key.clone(), value.clone());
+
+        if self.evict_policy == MemtableEvictPolicy::LeastWritten
+            || self.evict_policy == MemtableEvictPolicy::LeastReadOrWritten
+        {
+            self.set_priority(&key);
+        }
+    }
+
+    fn get(&mut self, key: &IndexableValue) -> Option<&T> {
+        if self.evict_policy == MemtableEvictPolicy::LeastRead
+            || self.evict_policy == MemtableEvictPolicy::LeastReadOrWritten
+        {
+            self.set_priority(&key);
+        }
+
+        self.records.get(key)
+    }
+}
+
+impl<Field: Eq + Clone + Debug, T: Clone + Debug> SimpleMemtable<Field, T> {
+    fn set_priority(&mut self, key: &IndexableValue) {
+        let priority = self.get_and_increment_current_priority();
+        match self.evict_queue.get(key) {
+            Some(_) => {
+                self.evict_queue.change_priority(key, priority);
+            }
+            None => {
+                self.evict_queue.push(key.clone(), priority);
+            }
+        }
+    }
+
+    fn get_and_increment_current_priority(&mut self) -> i64 {
+        let ret = -(self.n_operations as i64);
+        self.n_operations += 1;
+        ret
+    }
+}
+
 pub struct DB<Field: Eq + Clone + Debug> {
     config: Config<Field>,
     log_path: PathBuf,
-    primary_memtable: BTreeMap<IndexableValue, Record>,
-    secondary_memtables: Vec<BTreeMap<IndexableValue, HashSet<Record>>>,
+    primary_memtable: SimpleMemtable<Field, Record>,
+    secondary_memtables: Vec<SimpleMemtable<Field, HashSet<Record>>>,
 }
 
 impl<Field: Eq + Clone + Debug> DB<Field> {
@@ -335,11 +430,21 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 }
             }
         }
-        let primary_memtable = BTreeMap::<IndexableValue, Record>::new();
+        let primary_memtable = SimpleMemtable::new(
+            &config.primary_key,
+            config.memtable_capacity,
+            config.memtable_evict_policy.clone(),
+        );
         let secondary_memtables = config
             .secondary_keys
             .iter()
-            .map(|_| BTreeMap::<IndexableValue, HashSet<Record>>::new())
+            .map(|key| {
+                SimpleMemtable::new(
+                    key,
+                    config.memtable_capacity,
+                    config.memtable_evict_policy.clone(),
+                )
+            })
             .collect();
 
         let db = DB::<Field> {
@@ -440,17 +545,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                     "Primary key must be an IndexableValue",
                 ))?;
 
-        if self.primary_memtable.len() < self.config.memtable_capacity {
-            // TODO: handle capacity better, remove oldest records
-            debug!(
-                "Inserting record into primary memtable with key {:?} = {:?}",
-                &self.config.primary_key, &primary_value,
-            );
-            self.primary_memtable
-                .insert(primary_value.clone(), record.clone());
-        } else {
-            debug!("Primary memtable is full, not inserting");
-        }
+        self.primary_memtable.set(primary_value, record);
 
         // TODO: Update secondary memtables
 
@@ -516,7 +611,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         let mut log_reader = LogReader::new(&mut file)?;
         let result = log_reader.find(|record| {
-            let record_key = record.values[key_index].as_indexable().unwrap();
+            let record_key = record.values[key_index]
+                .as_indexable()
+                .expect("A non-indexable value was stored at key index");
             record_key == query_key
         });
 
@@ -533,18 +630,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Found matching record in log file");
 
-        if self.primary_memtable.len() < self.config.memtable_capacity {
-            if *field == self.config.primary_key {
-                // TODO: handle capacity better, remove oldest records
-                debug!(
-                    "Inserting record into primary memtable with key {:?} = {:?}",
-                    &field, &query_key,
-                );
-                self.primary_memtable
-                    .insert(query_key.clone(), result_value.clone());
-            }
-        } else {
-            debug!("Primary memtable is full, not inserting");
+        if *field == self.config.primary_key {
+            self.primary_memtable.set(&query_key, &result_value);
         }
 
         Ok(Some(result_value))
