@@ -2,13 +2,16 @@ use std::fs::{metadata, File};
 use std::io::{self};
 use std::path::PathBuf;
 
+// For Unix-like systems
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt; // For Unix-like systems
+use std::os::unix::fs::MetadataExt;
 
+// For Windows
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt; // For Windows
+use std::os::windows::fs::MetadataExt;
 
 pub const ACTIVE_LOG_FILENAME: &str = "db";
+pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const FIELD_SEPARATOR: u8 = b'\x1C';
 pub const ESCAPE_CHARACTER: u8 = b'\x1D';

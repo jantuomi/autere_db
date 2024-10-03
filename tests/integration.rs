@@ -1,3 +1,7 @@
+extern crate ctor;
+extern crate tempfile;
+
+use ctor::ctor;
 use env_logger;
 use log_db;
 use log_db::{ForwardLogReader, Record, RecordFieldType, RecordValue, ReverseLogReader, DB};
@@ -5,17 +9,25 @@ use serial_test::serial;
 use std::fs;
 use std::path::Path;
 use std::thread;
+use std::time::Duration;
+use tempfile::tempdir;
 
-const TEST_DATA_DIR: &str = "test_db_data";
 const TEST_RESOURCES_DIR: &str = "tests/resources";
 
-fn init_test() {
+#[ctor]
+fn init_logger() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
-fn cleanup_test() {
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string())
-        .unwrap_or_else(|e| eprintln!("Failed to delete the test data directory: {:?}", e));
+fn tmp_dir() -> String {
+    let dir = tempdir()
+        .expect("Failed to create temporary directory")
+        .path()
+        .to_str()
+        .expect("Failed to convert temporary directory path to string")
+        .to_string();
+    fs::create_dir_all(&dir).expect("Failed to create temporary directory");
+    dir
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -26,12 +38,10 @@ enum Field {
 }
 
 #[test]
-#[serial]
 fn test_initialize() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let _db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
@@ -40,17 +50,13 @@ fn test_initialize() {
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_upsert_and_get_with_primary_memtable() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
@@ -76,17 +82,13 @@ fn test_upsert_and_get_with_primary_memtable() {
         (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
         _ => false,
     });
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_upsert_and_get_without_memtable() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .memtable_capacity(0)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
@@ -159,17 +161,13 @@ fn test_upsert_and_get_without_memtable() {
         (RecordValue::String(a), RecordValue::String(b)) => a == b,
         _ => false,
     });
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_upsert_fails_on_invalid_number_of_values() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
@@ -187,17 +185,13 @@ fn test_upsert_fails_on_invalid_number_of_values() {
         ],
     };
     assert!(db.upsert(&record).is_err());
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_upsert_fails_on_invalid_value_type() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
@@ -215,15 +209,10 @@ fn test_upsert_fails_on_invalid_value_type() {
         ],
     };
     assert!(db.upsert(&record).is_err());
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_reverse_log_reader_fixture_db1() {
-    init_test();
-
     let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -251,15 +240,10 @@ fn test_reverse_log_reader_fixture_db1() {
     });
 
     assert!(reverse_log_reader.next().is_none());
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_forward_log_reader_fixture_db1() {
-    init_test();
-
     let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -286,17 +270,13 @@ fn test_forward_log_reader_fixture_db1() {
     });
 
     assert!(forward_log_reader.next().is_none());
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_upsert_and_get_from_secondary_memtable() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
@@ -336,7 +316,7 @@ fn test_upsert_and_get_from_secondary_memtable() {
     db.upsert(&record2).unwrap();
 
     // Delete the DB so that any results must come from a memtable
-    fs::remove_file(Path::new(TEST_DATA_DIR).join("db")).expect("Failed to delete the DB log file");
+    fs::remove_file(Path::new(&data_dir).join("db")).expect("Failed to delete the DB log file");
 
     // There should be 2 Johns
     let johns = db
@@ -344,25 +324,21 @@ fn test_upsert_and_get_from_secondary_memtable() {
         .expect("Failed to find all Johns");
 
     assert_eq!(johns.len(), 2);
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
-    init_test();
-
+    let data_dir = tmp_dir();
     // Copy the fixture DB to the test data directory
-    fs::create_dir_all(TEST_DATA_DIR).expect("Failed to create the test data directory");
+    fs::create_dir_all(&data_dir).expect("Failed to create the test data directory");
     fs::copy(
         &Path::new(TEST_RESOURCES_DIR).join("test_db2"),
-        &Path::new(TEST_DATA_DIR).join("db"),
+        &Path::new(&data_dir).join("db"),
     )
     .expect("Failed to copy the fixture DB");
 
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![
             (Field::Id, RecordFieldType::Int),
             (Field::Name, RecordFieldType::String),
@@ -373,7 +349,7 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
         .expect("Failed to initialize DB instance");
 
     // Delete the DB so that any results must come from a memtable
-    fs::remove_file(Path::new(TEST_DATA_DIR).join("db")).expect("Failed to delete the DB log file");
+    fs::remove_file(Path::new(&data_dir).join("db")).expect("Failed to delete the DB log file");
 
     let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
 
@@ -383,20 +359,19 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
         (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
         _ => false,
     });
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_multiple_writing_threads() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut threads = vec![];
-    for i in 0..10 {
+    let threads_n = 100;
+
+    for i in 0..threads_n {
+        let data_dir = data_dir.clone();
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
-                .data_dir(TEST_DATA_DIR)
+                .data_dir(&data_dir)
                 .fields(&vec![(Field::Id, RecordFieldType::Int)])
                 .primary_key(Field::Id)
                 .initialize()
@@ -415,13 +390,13 @@ fn test_multiple_writing_threads() {
 
     // Read the records
     let mut db = DB::configure()
-        .data_dir(TEST_DATA_DIR)
+        .data_dir(&data_dir)
         .fields(&vec![(Field::Id, RecordFieldType::Int)])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    for i in 0..10 {
+    for i in 0..threads_n {
         let result = db
             .get(&RecordValue::Int(i))
             .expect("Failed to get record")
@@ -432,32 +407,34 @@ fn test_multiple_writing_threads() {
             _ => false,
         });
     }
-
-    cleanup_test();
 }
 
 #[test]
-#[serial]
 fn test_one_writer_and_multiple_reading_threads() {
-    init_test();
-
+    let data_dir = tmp_dir();
     let mut threads = vec![];
+    let threads_n = 20;
 
     // Add readers that poll for the records
-    for i in 0..10 {
+    for i in 0..threads_n {
+        let data_dir = data_dir.clone();
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
-                .data_dir(TEST_DATA_DIR)
+                .data_dir(&data_dir)
                 .fields(&vec![(Field::Id, RecordFieldType::Int)])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
 
+            let mut timeout = 5;
             loop {
                 let result = db.get(&RecordValue::Int(i)).expect("Failed to get record");
-
                 match result {
-                    None => continue,
+                    None => {
+                        thread::sleep(Duration::from_millis(timeout));
+                        timeout = std::cmp::min(timeout * 2, 100);
+                        continue;
+                    }
                     Some(result) => {
                         let expected = RecordValue::Int(i);
                         assert!(match (&result.values[0], &expected) {
@@ -474,13 +451,13 @@ fn test_one_writer_and_multiple_reading_threads() {
     // Add a writer that inserts the records
     threads.push(thread::spawn(move || {
         let mut db = DB::configure()
-            .data_dir(TEST_DATA_DIR)
+            .data_dir(&data_dir)
             .fields(&vec![(Field::Id, RecordFieldType::Int)])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB instance");
 
-        for i in 0..10 {
+        for i in 0..threads_n {
             let record = Record {
                 values: vec![RecordValue::Int(i)],
             };
@@ -491,6 +468,4 @@ fn test_one_writer_and_multiple_reading_threads() {
     for thread in threads {
         thread.join().expect("Failed to join thread");
     }
-
-    cleanup_test();
 }

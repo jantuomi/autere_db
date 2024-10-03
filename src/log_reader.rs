@@ -3,11 +3,11 @@ use rev_buf_reader::RevBufReader;
 use std::fs::{self};
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 
-/// There are three special characters that need to be handled:
+/// There are three special sequences that need to be handled:
 /// Here: SC = escape char, FS = field separator.
-/// - FS FS SC  -> actual record separator
-/// - SC FS SC  -> literal FS
-/// - SC SC SC  -> literal SC
+/// - SC FS FS SC  -> actual record separator
+/// - SC SC FS SC  -> literal FS
+/// - SC SC SC SC  -> literal SC
 fn validate_special(buf: &[u8]) -> Option<SpecialSequence> {
     match buf {
         SEQ_RECORD_SEP => Some(SpecialSequence::RecordSeparator),

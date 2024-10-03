@@ -3,15 +3,17 @@ name = "log_db"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["lib"]
+
 [dependencies]
 fs2 = "0.4.3"
 log = "0.4.22"
 priority-queue = "2.1.1"
 rev_buf_reader = "0.3.0"
 
-[lib]
-crate-type = ["lib"]
-
 [dev-dependencies]
+ctor = "0.2.8"
 env_logger = "0.11.5"
 serial_test = "3.1.1"
+tempfile = "3.13.0"

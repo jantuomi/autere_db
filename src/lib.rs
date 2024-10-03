@@ -8,6 +8,7 @@ mod primary_memtable;
 mod secondary_memtable;
 
 pub use common::*;
+use fs2::lock_contended_error;
 use fs2::FileExt;
 pub use log_reader::ForwardLogReader;
 pub use log_reader::ReverseLogReader;
@@ -17,6 +18,7 @@ use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
 
 pub struct ConfigBuilder<'a, Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
@@ -156,10 +158,16 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let log_path = Path::new(&config.data_dir).join(ACTIVE_LOG_FILENAME);
 
         // Create the log file if it does not exist
-        let _file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)?;
+
+        // Create the exclusive lock request file if it does not exist
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&Path::new(&config.data_dir).join(EXCL_LOCK_REQUEST_FILENAME))?;
 
         // Calculate the index of the primary value in a record
         let primary_key_index = config
@@ -283,7 +291,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .open(&self.log_path)?;
 
         // Acquire an exclusive lock for writing
-        file.lock_exclusive()?;
+        self.request_exclusive_lock(&self.config.data_dir, &mut file)?;
 
         if !is_file_same_as_path(&file, &self.log_path)? {
             // The log file has been rotated, so we must try again
@@ -351,7 +359,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         // Open the file and acquire a shared lock for reading
         let mut file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
-        file.lock_shared()?;
+
+        self.request_shared_lock(&self.config.data_dir, &mut file)?;
 
         if !is_file_same_as_path(&file, &self.log_path)? {
             // The log file has been rotated, so we must try again
@@ -517,5 +526,82 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                     }
                 }
             });
+    }
+
+    fn request_exclusive_lock(&self, data_dir: &str, file: &mut fs::File) -> Result<(), io::Error> {
+        // Create a lock on the exclusive lock request file to signal to readers that they should wait
+        let lock_request_path = Path::new(data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
+        let lock_request_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true) // When requesting a lock, we need to have either read or write permissions
+            .open(&lock_request_path)?;
+
+        // Attempt to acquire an exclusive lock on the lock request file
+        // This will block until the lock is acquired
+        lock_request_file.lock_exclusive()?;
+
+        // Check that the exclusive lock request file is still the same as the one we opened
+        if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
+            // The lock request file has been removed
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Lock request file was removed unexpectedly",
+            ));
+        }
+
+        // Acquire an exclusive lock on the log file
+        file.lock_exclusive()?;
+
+        // Unlock the request file
+        lock_request_file.unlock()?;
+
+        Ok(())
+    }
+
+    fn is_exclusive_lock_requested(&self, data_dir: &str) -> Result<bool, io::Error> {
+        let lock_request_path = Path::new(data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
+        let lock_request_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true) // When requesting a lock, we need to have either read or write permissions
+            .open(&lock_request_path)?;
+
+        // Attempt to acquire a shared lock on the lock request file
+        // If the file is already locked, return false
+        match lock_request_file.try_lock_shared() {
+            Err(e) => {
+                if e.kind() == lock_contended_error().kind() {
+                    return Ok(true);
+                }
+                return Err(e);
+            }
+            Ok(_) => {
+                // Check that the exclusive lock request file is still the same as the one we opened
+                if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
+                    // The lock request file has been removed
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Lock request file was removed unexpectedly",
+                    ));
+                }
+
+                lock_request_file.unlock()?;
+                return Ok(false);
+            }
+        }
+    }
+
+    fn request_shared_lock(&self, data_dir: &str, file: &mut fs::File) -> Result<(), io::Error> {
+        const SHARED_LOCK_WAIT_MAX_MS: u64 = 100;
+        let mut timeout = 5;
+        loop {
+            if self.is_exclusive_lock_requested(data_dir)? {
+                debug!("Exclusive lock requested, waiting for {}ms before requesting a shared lock again", timeout);
+                thread::sleep(std::time::Duration::from_millis(timeout));
+                timeout = std::cmp::min(timeout * 2, SHARED_LOCK_WAIT_MAX_MS);
+            } else {
+                file.lock_shared()?;
+                return Ok(());
+            }
+        }
     }
 }
