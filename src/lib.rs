@@ -9,7 +9,8 @@ mod secondary_memtable;
 
 pub use common::*;
 use fs2::FileExt;
-pub use log_reader::LogReader;
+pub use log_reader::ForwardLogReader;
+pub use log_reader::ReverseLogReader;
 use primary_memtable::PrimaryMemtable;
 use secondary_memtable::SecondaryMemtable;
 use std::fmt::Debug;
@@ -146,7 +147,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     }
 
     fn initialize(config: &Config<Field>) -> Result<DB<Field>, io::Error> {
-        info!("Initializing DB");
+        info!("Initializing DB...");
         // If data_dir does not exist, create it
         if !fs::exists(&config.data_dir)? {
             fs::create_dir_all(&config.data_dir)?;
@@ -214,13 +215,25 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             })
             .collect();
 
-        let db = DB::<Field> {
+        let mut db = DB::<Field> {
             config: config.clone(),
-            log_path,
+            log_path: log_path.clone(),
             primary_key_index,
             primary_memtable,
             secondary_memtables,
         };
+
+        info!("Rebuilding memtable indexes...");
+        let mut file = fs::OpenOptions::new().read(true).open(&log_path)?;
+
+        let forward_log_reader = ForwardLogReader::new(&mut file);
+        for record in forward_log_reader {
+            db.update_primary_index(&record);
+            db.update_secondary_indexes(&record);
+        }
+
+        info!("Database ready.");
+
         Ok(db)
     }
 
@@ -295,34 +308,12 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         file.unlock()?;
 
         debug!("Record appended to log file, lock released");
+
         debug!("Updating primary memtable");
+        self.update_primary_index(record);
 
-        let primary_value =
-            &record.values[self.primary_key_index]
-                .as_indexable()
-                .ok_or(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Primary key must be an IndexableValue",
-                ))?;
-
-        self.primary_memtable.set(primary_value, record);
-
-        self.secondary_memtables
-            .iter_mut()
-            .for_each(|secondary_memtable| {
-                debug!(
-                    "Updating memtable for index on {:?}",
-                    &secondary_memtable.field
-                );
-                for (index, (schema_field, _)) in self.config.fields.iter().enumerate() {
-                    if schema_field == &secondary_memtable.field {
-                        let key = record.values[index]
-                            .as_indexable()
-                            .expect("Secondary index key was not indexable");
-                        secondary_memtable.set(&key, record);
-                    }
-                }
-            });
+        debug!("Updating secondary memtables");
+        self.update_secondary_indexes(record);
 
         Ok(())
     }
@@ -372,8 +363,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Lock acquired, searching log file for record");
 
-        let mut log_reader = LogReader::new(&mut file)?;
-        let result = log_reader.find(|record| {
+        let mut reverse_log_reader = ReverseLogReader::new(&mut file)?;
+        let result = reverse_log_reader.find(|record| {
             let record_key = record.values[self.primary_key_index]
                 .as_indexable()
                 .expect("A non-indexable value was stored at key index");
@@ -391,8 +382,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             }
         };
 
-        debug!("Found matching record in log file. Storing result in primary memtable.");
-        self.primary_memtable.set(&query_key, &result_value);
+        debug!("Found matching record in log file.");
+
+        debug!("Updating primary memtable");
+        self.update_primary_index(&result_value);
+
+        debug!("Updating secondary memtables");
+        self.update_secondary_indexes(&result_value);
 
         Ok(Some(result_value))
     }
@@ -472,7 +468,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Lock acquired, searching log file for record");
 
-        let result = LogReader::new(&mut file)?
+        let result = ReverseLogReader::new(&mut file)?
             .filter(|record| {
                 let record_key = record.values[key_index]
                     .as_indexable()
@@ -495,5 +491,31 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
 
         Ok(result)
+    }
+
+    fn update_primary_index(&mut self, record: &Record) {
+        let key = record.values[self.primary_key_index]
+            .as_indexable()
+            .expect("A non-indexable value was stored at key index");
+        self.primary_memtable.set(&key, record);
+    }
+
+    fn update_secondary_indexes(&mut self, record: &Record) {
+        self.secondary_memtables
+            .iter_mut()
+            .for_each(|secondary_memtable| {
+                debug!(
+                    "Updating memtable for index on {:?}",
+                    &secondary_memtable.field
+                );
+                for (index, (schema_field, _)) in self.config.fields.iter().enumerate() {
+                    if schema_field == &secondary_memtable.field {
+                        let key = record.values[index]
+                            .as_indexable()
+                            .expect("Secondary index key was not indexable");
+                        secondary_memtable.set(&key, record);
+                    }
+                }
+            });
     }
 }

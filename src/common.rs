@@ -12,9 +12,28 @@ pub const ACTIVE_LOG_FILENAME: &str = "db";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const FIELD_SEPARATOR: u8 = b'\x1C';
 pub const ESCAPE_CHARACTER: u8 = b'\x1D';
-pub const SEQ_RECORD_SEP: &[u8] = &[FIELD_SEPARATOR, FIELD_SEPARATOR, ESCAPE_CHARACTER];
-pub const SEQ_LIT_ESCAPE: &[u8] = &[ESCAPE_CHARACTER, ESCAPE_CHARACTER, ESCAPE_CHARACTER];
-pub const SEQ_LIT_FIELD_SEP: &[u8] = &[ESCAPE_CHARACTER, FIELD_SEPARATOR, ESCAPE_CHARACTER];
+
+// Special sequences. Note: these must have the same length!
+// Since the log is read both forwards and backwards, we must have a signal
+// character (ESCAPE_CHARACTER) on both sides of the special sequence.
+pub const SEQ_RECORD_SEP: &[u8] = &[
+    ESCAPE_CHARACTER,
+    FIELD_SEPARATOR,
+    FIELD_SEPARATOR,
+    ESCAPE_CHARACTER,
+];
+pub const SEQ_LIT_ESCAPE: &[u8] = &[
+    ESCAPE_CHARACTER,
+    ESCAPE_CHARACTER,
+    ESCAPE_CHARACTER,
+    ESCAPE_CHARACTER,
+];
+pub const SEQ_LIT_FIELD_SEP: &[u8] = &[
+    ESCAPE_CHARACTER,
+    ESCAPE_CHARACTER,
+    FIELD_SEPARATOR,
+    ESCAPE_CHARACTER,
+];
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum SpecialSequence {

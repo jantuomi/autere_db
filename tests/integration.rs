@@ -1,6 +1,6 @@
 use env_logger;
 use log_db;
-use log_db::{LogReader, Record, RecordFieldType, RecordValue, DB};
+use log_db::{ForwardLogReader, Record, RecordFieldType, RecordValue, ReverseLogReader, DB};
 use serial_test::serial;
 use std::fs;
 use std::path::Path;
@@ -18,6 +18,8 @@ enum Field {
 #[test]
 #[serial]
 fn test_initialize() {
+    init_test();
+
     let _db = DB::configure()
         .data_dir(TEST_DATA_DIR)
         .fields(&vec![
@@ -29,13 +31,14 @@ fn test_initialize() {
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    // Clean up
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+    cleanup_test();
 }
 
 #[test]
 #[serial]
-fn test_upsert_and_get_with_memtable() {
+fn test_upsert_and_get_with_primary_memtable() {
+    init_test();
+
     let mut db = DB::configure()
         .data_dir(TEST_DATA_DIR)
         .fields(&vec![
@@ -64,14 +67,14 @@ fn test_upsert_and_get_with_memtable() {
         _ => false,
     });
 
-    // Clean up
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+    cleanup_test();
 }
 
 #[test]
 #[serial]
 fn test_upsert_and_get_without_memtable() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    init_test();
+
     let mut db = DB::configure()
         .data_dir(TEST_DATA_DIR)
         .memtable_capacity(0)
@@ -147,13 +150,14 @@ fn test_upsert_and_get_without_memtable() {
         _ => false,
     });
 
-    // Clean up
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+    cleanup_test();
 }
 
 #[test]
 #[serial]
 fn test_upsert_fails_on_invalid_number_of_values() {
+    init_test();
+
     let mut db = DB::configure()
         .data_dir(TEST_DATA_DIR)
         .fields(&vec![
@@ -174,13 +178,14 @@ fn test_upsert_fails_on_invalid_number_of_values() {
     };
     assert!(db.upsert(&record).is_err());
 
-    // Clean up
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+    cleanup_test();
 }
 
 #[test]
 #[serial]
 fn test_upsert_fails_on_invalid_value_type() {
+    init_test();
+
     let mut db = DB::configure()
         .data_dir(TEST_DATA_DIR)
         .fields(&vec![
@@ -201,41 +206,85 @@ fn test_upsert_fails_on_invalid_value_type() {
     };
     assert!(db.upsert(&record).is_err());
 
-    // Clean up
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+    cleanup_test();
 }
 
 #[test]
 #[serial]
-fn test_log_reader_fixture_db1() {
-    let _ = env_logger::builder().is_test(true).try_init();
+fn test_reverse_log_reader_fixture_db1() {
+    init_test();
+
     let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
     let mut file = fs::OpenOptions::new()
         .read(true)
         .open(&db_path)
         .expect("Failed to open file");
-    let mut log_reader = LogReader::new(&mut file).unwrap();
+    let mut reverse_log_reader = ReverseLogReader::new(&mut file).unwrap();
 
     // There are two records in the log with "schema": Int, Null
 
-    let last_record = log_reader.next().expect("Failed to read the last record");
+    let last_record = reverse_log_reader
+        .next()
+        .expect("Failed to read the last record");
     assert!(match last_record.values.as_slice() {
         [RecordValue::Int(10), RecordValue::Null] => true,
         _ => false,
     });
 
-    let first_record = log_reader.next().expect("Failed to read the first record");
+    let first_record = reverse_log_reader
+        .next()
+        .expect("Failed to read the first record");
     assert!(match first_record.values.as_slice() {
         // Note: the int value is equal to the escape byte
         [RecordValue::Int(0x1D), RecordValue::Null] => true,
         _ => false,
     });
+
+    assert!(reverse_log_reader.next().is_none());
+
+    cleanup_test();
+}
+
+#[test]
+#[serial]
+fn test_forward_log_reader_fixture_db1() {
+    init_test();
+
+    let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .open(&db_path)
+        .expect("Failed to open file");
+    let mut forward_log_reader = ForwardLogReader::new(&mut file);
+
+    // There are two records in the log with "schema": Int, Null
+
+    let first_record = forward_log_reader
+        .next()
+        .expect("Failed to read the first record");
+    assert!(match first_record.values.as_slice() {
+        [RecordValue::Int(0x1D), RecordValue::Null] => true,
+        _ => false,
+    });
+
+    let last_record = forward_log_reader
+        .next()
+        .expect("Failed to read the last record");
+    assert!(match last_record.values.as_slice() {
+        [RecordValue::Int(10), RecordValue::Null] => true,
+        _ => false,
+    });
+
+    assert!(forward_log_reader.next().is_none());
+
+    cleanup_test();
 }
 
 #[test]
 #[serial]
 fn test_upsert_and_get_from_secondary_memtable() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    init_test();
+
     let mut db = DB::configure()
         .data_dir(TEST_DATA_DIR)
         .fields(&vec![
@@ -286,6 +335,53 @@ fn test_upsert_and_get_from_secondary_memtable() {
 
     assert_eq!(johns.len(), 2);
 
-    // Clean up
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string()).unwrap();
+    cleanup_test();
+}
+
+#[test]
+#[serial]
+fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
+    init_test();
+
+    // Copy the fixture DB to the test data directory
+    fs::create_dir_all(TEST_DATA_DIR).expect("Failed to create the test data directory");
+    fs::copy(
+        &Path::new(TEST_RESOURCES_DIR).join("test_db2"),
+        &Path::new(TEST_DATA_DIR).join("db"),
+    )
+    .expect("Failed to copy the fixture DB");
+
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![
+            (Field::Id, RecordFieldType::Int),
+            (Field::Name, RecordFieldType::String),
+            (Field::Data, RecordFieldType::Bytes),
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Delete the DB so that any results must come from a memtable
+    fs::remove_file(Path::new(TEST_DATA_DIR).join("db")).expect("Failed to delete the DB log file");
+
+    let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
+
+    // Check that the IDs match
+    let expected = RecordValue::Int(1);
+    assert!(match (&result.values[0], &expected) {
+        (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+        _ => false,
+    });
+
+    cleanup_test();
+}
+
+fn init_test() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
+
+fn cleanup_test() {
+    std::fs::remove_dir_all(TEST_DATA_DIR.to_string())
+        .unwrap_or_else(|e| eprintln!("Failed to delete the test data directory: {:?}", e));
 }
