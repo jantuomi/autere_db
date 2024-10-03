@@ -4,9 +4,19 @@ use log_db::{ForwardLogReader, Record, RecordFieldType, RecordValue, ReverseLogR
 use serial_test::serial;
 use std::fs;
 use std::path::Path;
+use std::thread;
 
 const TEST_DATA_DIR: &str = "test_db_data";
 const TEST_RESOURCES_DIR: &str = "tests/resources";
+
+fn init_test() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}
+
+fn cleanup_test() {
+    std::fs::remove_dir_all(TEST_DATA_DIR.to_string())
+        .unwrap_or_else(|e| eprintln!("Failed to delete the test data directory: {:?}", e));
+}
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 enum Field {
@@ -377,11 +387,110 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
     cleanup_test();
 }
 
-fn init_test() {
-    let _ = env_logger::builder().is_test(true).try_init();
+#[test]
+#[serial]
+fn test_multiple_writing_threads() {
+    init_test();
+
+    let mut threads = vec![];
+    for i in 0..10 {
+        threads.push(thread::spawn(move || {
+            let mut db = DB::configure()
+                .data_dir(TEST_DATA_DIR)
+                .fields(&vec![(Field::Id, RecordFieldType::Int)])
+                .primary_key(Field::Id)
+                .initialize()
+                .expect("Failed to initialize DB instance");
+
+            let record = Record {
+                values: vec![RecordValue::Int(i)],
+            };
+            db.upsert(&record).expect("Failed to upsert record");
+        }));
+    }
+
+    for thread in threads {
+        thread.join().expect("Failed to join thread");
+    }
+
+    // Read the records
+    let mut db = DB::configure()
+        .data_dir(TEST_DATA_DIR)
+        .fields(&vec![(Field::Id, RecordFieldType::Int)])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    for i in 0..10 {
+        let result = db
+            .get(&RecordValue::Int(i))
+            .expect("Failed to get record")
+            .expect("Record not found");
+        let expected = RecordValue::Int(i);
+        assert!(match (&result.values[0], &expected) {
+            (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+            _ => false,
+        });
+    }
+
+    cleanup_test();
 }
 
-fn cleanup_test() {
-    std::fs::remove_dir_all(TEST_DATA_DIR.to_string())
-        .unwrap_or_else(|e| eprintln!("Failed to delete the test data directory: {:?}", e));
+#[test]
+#[serial]
+fn test_one_writer_and_multiple_reading_threads() {
+    init_test();
+
+    let mut threads = vec![];
+
+    // Add readers that poll for the records
+    for i in 0..10 {
+        threads.push(thread::spawn(move || {
+            let mut db = DB::configure()
+                .data_dir(TEST_DATA_DIR)
+                .fields(&vec![(Field::Id, RecordFieldType::Int)])
+                .primary_key(Field::Id)
+                .initialize()
+                .expect("Failed to initialize DB instance");
+
+            loop {
+                let result = db.get(&RecordValue::Int(i)).expect("Failed to get record");
+
+                match result {
+                    None => continue,
+                    Some(result) => {
+                        let expected = RecordValue::Int(i);
+                        assert!(match (&result.values[0], &expected) {
+                            (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+                            _ => false,
+                        });
+                        break;
+                    }
+                };
+            }
+        }));
+    }
+
+    // Add a writer that inserts the records
+    threads.push(thread::spawn(move || {
+        let mut db = DB::configure()
+            .data_dir(TEST_DATA_DIR)
+            .fields(&vec![(Field::Id, RecordFieldType::Int)])
+            .primary_key(Field::Id)
+            .initialize()
+            .expect("Failed to initialize DB instance");
+
+        for i in 0..10 {
+            let record = Record {
+                values: vec![RecordValue::Int(i)],
+            };
+            db.upsert(&record).expect("Failed to upsert record");
+        }
+    }));
+
+    for thread in threads {
+        thread.join().expect("Failed to join thread");
+    }
+
+    cleanup_test();
 }
