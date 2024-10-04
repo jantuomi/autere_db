@@ -1,6 +1,5 @@
 #[macro_use]
 extern crate log;
-extern crate rev_buf_reader;
 
 mod common;
 mod log_reader;

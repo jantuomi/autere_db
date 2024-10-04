@@ -3,16 +3,14 @@ extern crate tempfile;
 
 use ctor::ctor;
 use env_logger;
+use log::debug;
 use log_db;
-use log_db::{ForwardLogReader, Record, RecordFieldType, RecordValue, ReverseLogReader, DB};
-use serial_test::serial;
+use log_db::{Record, RecordFieldType, RecordValue, DB, TEST_RESOURCES_DIR};
 use std::fs;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
-
-const TEST_RESOURCES_DIR: &str = "tests/resources";
 
 #[ctor]
 fn init_logger() {
@@ -212,67 +210,6 @@ fn test_upsert_fails_on_invalid_value_type() {
 }
 
 #[test]
-fn test_reverse_log_reader_fixture_db1() {
-    let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .open(&db_path)
-        .expect("Failed to open file");
-    let mut reverse_log_reader = ReverseLogReader::new(&mut file).unwrap();
-
-    // There are two records in the log with "schema": Int, Null
-
-    let last_record = reverse_log_reader
-        .next()
-        .expect("Failed to read the last record");
-    assert!(match last_record.values.as_slice() {
-        [RecordValue::Int(10), RecordValue::Null] => true,
-        _ => false,
-    });
-
-    let first_record = reverse_log_reader
-        .next()
-        .expect("Failed to read the first record");
-    assert!(match first_record.values.as_slice() {
-        // Note: the int value is equal to the escape byte
-        [RecordValue::Int(0x1D), RecordValue::Null] => true,
-        _ => false,
-    });
-
-    assert!(reverse_log_reader.next().is_none());
-}
-
-#[test]
-fn test_forward_log_reader_fixture_db1() {
-    let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .open(&db_path)
-        .expect("Failed to open file");
-    let mut forward_log_reader = ForwardLogReader::new(&mut file);
-
-    // There are two records in the log with "schema": Int, Null
-
-    let first_record = forward_log_reader
-        .next()
-        .expect("Failed to read the first record");
-    assert!(match first_record.values.as_slice() {
-        [RecordValue::Int(0x1D), RecordValue::Null] => true,
-        _ => false,
-    });
-
-    let last_record = forward_log_reader
-        .next()
-        .expect("Failed to read the last record");
-    assert!(match last_record.values.as_slice() {
-        [RecordValue::Int(10), RecordValue::Null] => true,
-        _ => false,
-    });
-
-    assert!(forward_log_reader.next().is_none());
-}
-
-#[test]
 fn test_upsert_and_get_from_secondary_memtable() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
@@ -413,7 +350,7 @@ fn test_multiple_writing_threads() {
 fn test_one_writer_and_multiple_reading_threads() {
     let data_dir = tmp_dir();
     let mut threads = vec![];
-    let threads_n = 20;
+    let threads_n = 100;
 
     // Add readers that poll for the records
     for i in 0..threads_n {
@@ -468,4 +405,42 @@ fn test_one_writer_and_multiple_reading_threads() {
     for thread in threads {
         thread.join().expect("Failed to join thread");
     }
+}
+
+#[test]
+fn test_literal_escape_is_escaped() {
+    let data_dir = tmp_dir();
+    debug!("data_dir: {:?}", data_dir);
+
+    let mut db = DB::configure()
+        .data_dir(&data_dir)
+        .memtable_capacity(0) // disable memtables
+        .fields(&vec![
+            (Field::Id, RecordFieldType::Int),
+            (Field::Data, RecordFieldType::Bytes),
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    let record = Record {
+        values: vec![
+            RecordValue::Int(1),
+            RecordValue::Bytes(vec![0x1A, 0x1B, 0x1C, 0x1D]),
+        ],
+    };
+
+    db.upsert(&record).expect("Failed to upsert record");
+
+    let found = db
+        .get(&RecordValue::Int(1))
+        .expect("Failed to get record")
+        .expect("Record not found");
+
+    let received = match &found.values[1] {
+        RecordValue::Bytes(bytes) => bytes,
+        _ => panic!("Unexpected record value type"),
+    };
+
+    assert_eq!(received, &vec![0x1A, 0x1B, 0x1C, 0x1D]);
 }

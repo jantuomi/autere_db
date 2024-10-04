@@ -15,6 +15,7 @@ pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const FIELD_SEPARATOR: u8 = b'\x1C';
 pub const ESCAPE_CHARACTER: u8 = b'\x1D';
+pub const TEST_RESOURCES_DIR: &str = "tests/resources";
 
 // Special sequences. Note: these must have the same length!
 // Since the log is read both forwards and backwards, we must have a signal

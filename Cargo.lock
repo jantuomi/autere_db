@@ -291,7 +291,6 @@ dependencies = [
  "fs2",
  "log",
  "priority-queue",
- "rev_buf_reader",
  "serial_test",
  "tempfile",
 ]
@@ -409,15 +408,6 @@ name = "regex-syntax"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
-
-[[package]]
-name = "rev_buf_reader"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c0f2e47e00e29920959826e2e1784728a3780d1a784247be5257258cc75f910"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "rustix"
