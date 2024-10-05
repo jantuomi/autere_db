@@ -2,16 +2,17 @@
 extern crate log;
 
 mod common;
-mod log_reader;
+mod forward_log_reader;
 mod primary_memtable;
+mod reverse_log_reader;
 mod secondary_memtable;
 
 pub use common::*;
+pub use forward_log_reader::ForwardLogReader;
 use fs2::lock_contended_error;
 use fs2::FileExt;
-pub use log_reader::ForwardLogReader;
-pub use log_reader::ReverseLogReader;
 use primary_memtable::PrimaryMemtable;
+pub use reverse_log_reader::ReverseLogReader;
 use secondary_memtable::SecondaryMemtable;
 use std::fmt::Debug;
 use std::fs::{self};

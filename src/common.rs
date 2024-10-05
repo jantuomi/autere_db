@@ -39,6 +39,22 @@ pub const SEQ_LIT_FIELD_SEP: &[u8] = &[
     ESCAPE_CHARACTER,
 ];
 
+/// There are three special sequences that need to be handled:
+/// Here: SC = escape char, FS = field separator.
+/// - SC FS FS SC  -> actual record separator
+/// - SC SC FS SC  -> literal FS
+/// - SC SC SC SC  -> literal SC
+///
+/// Returns SpecialSequence or None if not valid.
+pub fn validate_special(buf: &[u8]) -> Option<SpecialSequence> {
+    match buf {
+        SEQ_RECORD_SEP => Some(SpecialSequence::RecordSeparator),
+        SEQ_LIT_FIELD_SEP => Some(SpecialSequence::LiteralFieldSeparator),
+        SEQ_LIT_ESCAPE => Some(SpecialSequence::LiteralEscape),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum SpecialSequence {
     RecordSeparator,
