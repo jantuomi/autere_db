@@ -34,8 +34,8 @@ pub fn upsert_benchmark(c: &mut Criterion) {
         prefill_db_with_n_records(&mut db, size).expect("Failed to prefill DB");
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
-            let record = random_record();
             b.iter(|| {
+                let record = random_record();
                 let _ = db.upsert(black_box(&record));
             });
         });
@@ -64,8 +64,8 @@ pub fn get_benchmark(c: &mut Criterion) {
         prefill_db_with_n_records(&mut db, size).expect("Failed to prefill DB");
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
-            let id = random_int();
             b.iter(|| {
+                let id = random_int();
                 let _ = db.get(black_box(&RecordValue::Int(id)));
             });
         });

@@ -322,7 +322,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         if self.config.write_durability == WriteDurability::Flush {
             self.log_file.flush()?;
         }
-        if self.config.write_durability == WriteDurability::SyncWrite {
+        if self.config.write_durability == WriteDurability::FlushSync {
             self.log_file.flush()?;
             self.log_file.sync_all()?;
         }

@@ -72,15 +72,16 @@ pub enum MemtableEvictPolicy {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WriteDurability {
     /// Changes are written to an application-level write buffer without flushing to the OS write buffer or syncing to disk.
+    /// The buffered writer will batch writes to the OS buffer for maximum performance.
     /// Offers the lowest durability guarantees but is very fast.
-    AsyncWrite,
-    /// Changes are written to the OS write buffer but not synced to disk.
-    /// Offers better durability guarantees than AsyncWrite but is slower.
+    Async,
+    /// Changes are written to the OS write buffer but not immediately synced to disk.
+    /// Offers better durability guarantees than Async but is slower.
     /// This is generally recommended. Most OSes will sync the write buffer to disk within a few seconds.
     Flush,
-    /// Changes are written to the OS write buffer and synced to disk.
+    /// Changes are written to the OS write buffer and synced to disk immediately.
     /// Offers the best durability guarantees but is the slowest.
-    SyncWrite,
+    FlushSync,
 }
 
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]

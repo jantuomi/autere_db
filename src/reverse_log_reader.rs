@@ -93,6 +93,7 @@ impl<'a> ReverseLogReader<'a> {
 
     /// Read exactly `buf.len()` bytes from the file, return an error if the file is exhausted.
     /// The bytes are returned in start -> end order.
+    /// If an error is returned, the contents of `buf` are in an undefined state.
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
         let mut read = 0;
         while read < buf.len() {
@@ -105,13 +106,15 @@ impl<'a> ReverseLogReader<'a> {
                     ));
                 }
             }
-            let bytes_to_read = std::cmp::min(buf.len() - read, self.internal_pos);
-            buf[read..read + bytes_to_read].copy_from_slice(
-                &self.internal_buf[self.internal_pos - bytes_to_read..self.internal_pos],
-            );
-            self.internal_pos -= bytes_to_read;
-            read += bytes_to_read;
+
+            let end = buf.len() - read;
+            let n = std::cmp::min(self.internal_pos, end);
+            buf[end - n..end]
+                .copy_from_slice(&self.internal_buf[self.internal_pos - n..self.internal_pos]);
+            read += n;
+            self.internal_pos -= n;
         }
+
         Ok(read)
     }
 
@@ -169,10 +172,17 @@ impl<'a> ReverseLogReader<'a> {
 
         match validate_special(&special_buf.as_slice()) {
             Some(special) => Ok(special),
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Not a special sequence: {:?}", special_buf),
-            )),
+            None => {
+                let pos = self.file.stream_position().unwrap() + self.internal_pos as u64;
+
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Not a special sequence: {:?} at pos: {:x}",
+                        special_buf, pos,
+                    ),
+                ))
+            }
         }
     }
 }
@@ -320,7 +330,6 @@ mod reverse_reader_tests {
         let mut reader = ReverseLogReader::new(&mut file).unwrap();
         let mut buf = vec![0; 10];
         assert!(reader.read_exact(&mut buf).unwrap_err().kind() == io::ErrorKind::UnexpectedEof);
-        assert_eq!(String::from_utf8(buf[..5].to_vec()).unwrap(), "hello");
     }
 }
 
@@ -331,7 +340,9 @@ impl Iterator for ReverseLogReader<'_> {
         match self.read_record() {
             Ok(Some(record)) => Some(record),
             Ok(None) => None,
-            Err(err) => panic!("Error reading record: {:?}", err),
+            Err(err) => {
+                panic!("Error reading record: {:?}", err,)
+            }
         }
     }
 }

@@ -299,6 +299,39 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
 }
 
 #[test]
+fn test_initialize_without_memtables_fixture_db3() {
+    let data_dir = tmp_dir();
+    // Copy the fixture DB to the test data directory
+    fs::create_dir_all(&data_dir).expect("Failed to create the test data directory");
+    fs::copy(
+        &Path::new(TEST_RESOURCES_DIR).join("test_db3"),
+        &Path::new(&data_dir).join("db"),
+    )
+    .expect("Failed to copy the fixture DB");
+
+    let mut db = DB::configure()
+        .data_dir(&data_dir)
+        .fields(&vec![
+            (Field::Id, RecordFieldType::Int),
+            (Field::Name, RecordFieldType::String),
+            (Field::Data, RecordFieldType::Bytes),
+        ])
+        .memtable_capacity(0)
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
+
+    // Check that the IDs match
+    let expected = RecordValue::Int(1);
+    assert!(match (&result.values[0], &expected) {
+        (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+        _ => false,
+    });
+}
+
+#[test]
 fn test_multiple_writing_threads() {
     let data_dir = tmp_dir();
     let mut threads = vec![];
