@@ -4,8 +4,8 @@ extern crate tempfile;
 use ctor::ctor;
 use env_logger;
 use log::debug;
-use log_db;
-use log_db::{Record, RecordFieldType, RecordValue, DB, TEST_RESOURCES_DIR};
+use log_db::{self, RecordField};
+use log_db::{Record, RecordValue, DB, TEST_RESOURCES_DIR};
 use std::fs;
 use std::path::Path;
 use std::thread;
@@ -41,9 +41,9 @@ fn test_initialize() {
     let _db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -56,9 +56,9 @@ fn test_upsert_and_get_with_primary_memtable() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -89,9 +89,9 @@ fn test_upsert_and_get_without_memtable() {
         .data_dir(&data_dir)
         .memtable_capacity(0)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string().nullable()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -101,7 +101,7 @@ fn test_upsert_and_get_without_memtable() {
     let record0 = Record {
         values: vec![
             RecordValue::Int(0),
-            RecordValue::String("John".to_string()),
+            RecordValue::Null,
             RecordValue::Bytes(vec![3, 4, 5]),
         ],
     };
@@ -143,7 +143,7 @@ fn test_upsert_and_get_without_memtable() {
         _ => false,
     });
     assert!(match (&result.values[1], &record0.values[1]) {
-        (RecordValue::String(a), RecordValue::String(b)) => a == b,
+        (RecordValue::Null, RecordValue::Null) => true,
         _ => false,
     });
 
@@ -162,14 +162,31 @@ fn test_upsert_and_get_without_memtable() {
 }
 
 #[test]
+fn test_upsert_fails_on_null_in_non_nullable_field() {
+    let data_dir = tmp_dir();
+    let mut db = DB::configure()
+        .data_dir(&data_dir)
+        .fields(&vec![(Field::Id, RecordField::int())])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    let record = Record {
+        // Null value
+        values: vec![RecordValue::Null],
+    };
+    assert!(db.upsert(&record).is_err());
+}
+
+#[test]
 fn test_upsert_fails_on_invalid_number_of_values() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -191,9 +208,9 @@ fn test_upsert_fails_on_invalid_value_type() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -215,9 +232,9 @@ fn test_upsert_and_get_from_secondary_memtable() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .secondary_keys(vec![Field::Name])
@@ -277,9 +294,9 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -312,9 +329,9 @@ fn test_initialize_without_memtables_fixture_db3() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .memtable_capacity(0)
         .primary_key(Field::Id)
@@ -342,7 +359,7 @@ fn test_multiple_writing_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(&vec![(Field::Id, RecordFieldType::Int)])
+                .fields(&vec![(Field::Id, RecordField::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -361,7 +378,7 @@ fn test_multiple_writing_threads() {
     // Read the records
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(&vec![(Field::Id, RecordFieldType::Int)])
+        .fields(&vec![(Field::Id, RecordField::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -391,7 +408,7 @@ fn test_one_writer_and_multiple_reading_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(&vec![(Field::Id, RecordFieldType::Int)])
+                .fields(&vec![(Field::Id, RecordField::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -422,7 +439,7 @@ fn test_one_writer_and_multiple_reading_threads() {
     threads.push(thread::spawn(move || {
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(&vec![(Field::Id, RecordFieldType::Int)])
+            .fields(&vec![(Field::Id, RecordField::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -449,8 +466,8 @@ fn test_literal_escape_is_escaped() {
         .data_dir(&data_dir)
         .memtable_capacity(0) // disable memtables
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()

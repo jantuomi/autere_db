@@ -107,6 +107,48 @@ pub enum RecordFieldType {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecordField {
+    pub field_type: RecordFieldType,
+    pub nullable: bool,
+}
+
+impl RecordField {
+    pub fn int() -> Self {
+        RecordField {
+            field_type: RecordFieldType::Int,
+            nullable: false,
+        }
+    }
+
+    pub fn float() -> Self {
+        RecordField {
+            field_type: RecordFieldType::Float,
+            nullable: false,
+        }
+    }
+
+    pub fn string() -> Self {
+        RecordField {
+            field_type: RecordFieldType::String,
+            nullable: false,
+        }
+    }
+
+    pub fn bytes() -> Self {
+        RecordField {
+            field_type: RecordFieldType::Bytes,
+            nullable: false,
+        }
+    }
+
+    pub fn nullable(&mut self) -> Self {
+        let mut new = self.clone();
+        new.nullable = true;
+        new
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum RecordValue {
     Null,
     Int(i64),

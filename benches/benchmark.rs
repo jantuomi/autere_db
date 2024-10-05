@@ -26,9 +26,9 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
         let mut db = DB::configure()
             .data_dir(&data_dir)
             .fields(&vec![
-                (Field::Id, RecordFieldType::Int),
-                (Field::Name, RecordFieldType::String),
-                (Field::Data, RecordFieldType::Bytes),
+                (Field::Id, RecordField::int()),
+                (Field::Name, RecordField::string()),
+                (Field::Data, RecordField::bytes()),
             ])
             .primary_key(Field::Id)
             .initialize()
@@ -61,9 +61,9 @@ pub fn upsert_write_durability(c: &mut Criterion) {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
                 .fields(&vec![
-                    (Field::Id, RecordFieldType::Int),
-                    (Field::Name, RecordFieldType::String),
-                    (Field::Data, RecordFieldType::Bytes),
+                    (Field::Id, RecordField::int()),
+                    (Field::Name, RecordField::string()),
+                    (Field::Data, RecordField::bytes()),
                 ])
                 .write_durability(mode.clone())
                 .primary_key(Field::Id)
@@ -91,9 +91,9 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
             .data_dir(&data_dir)
             .memtable_capacity(0)
             .fields(&vec![
-                (Field::Id, RecordFieldType::Int),
-                (Field::Name, RecordFieldType::String),
-                (Field::Data, RecordFieldType::Bytes),
+                (Field::Id, RecordField::int()),
+                (Field::Name, RecordField::string()),
+                (Field::Data, RecordField::bytes()),
             ])
             .primary_key(Field::Id)
             .initialize()
@@ -123,9 +123,9 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -141,9 +141,9 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
                 .fields(&vec![
-                    (Field::Id, RecordFieldType::Int),
-                    (Field::Name, RecordFieldType::String),
-                    (Field::Data, RecordFieldType::Bytes),
+                    (Field::Id, RecordField::int()),
+                    (Field::Name, RecordField::string()),
+                    (Field::Data, RecordField::bytes()),
                 ])
                 .memtable_capacity(size)
                 .primary_key(Field::Id)
@@ -176,9 +176,9 @@ fn reverse_read_file_with_various_buffer_sizes(c: &mut Criterion) {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&vec![
-            (Field::Id, RecordFieldType::Int),
-            (Field::Name, RecordFieldType::String),
-            (Field::Data, RecordFieldType::Bytes),
+            (Field::Id, RecordField::int()),
+            (Field::Name, RecordField::string()),
+            (Field::Data, RecordField::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()

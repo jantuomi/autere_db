@@ -24,7 +24,7 @@ pub struct ConfigBuilder<'a, Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
     memtable_capacity: Option<usize>,
-    fields: Option<&'a Vec<(Field, RecordFieldType)>>,
+    fields: Option<&'a Vec<(Field, RecordField)>>,
     primary_key: Option<Field>,
     secondary_keys: Option<Vec<Field>>,
     memtable_evict_policy: Option<MemtableEvictPolicy>,
@@ -67,7 +67,7 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
     }
 
     /// The field schema of the database.
-    pub fn fields(&mut self, fields: &'a Vec<(Field, RecordFieldType)>) -> &mut Self {
+    pub fn fields(&mut self, fields: &'a Vec<(Field, RecordField)>) -> &mut Self {
         self.fields = Some(fields);
         self
     }
@@ -142,7 +142,7 @@ struct Config<Field: Eq + Clone> {
     pub data_dir: String,
     pub segment_size: usize,
     pub memtable_capacity: usize,
-    pub fields: Vec<(Field, RecordFieldType)>,
+    pub fields: Vec<(Field, RecordField)>,
     pub primary_key: Field,
     pub secondary_keys: Vec<Field>,
     pub memtable_evict_policy: MemtableEvictPolicy,
@@ -203,15 +203,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // If any of the keys is not in the schema or
         // is not an IndexableValue, return an error
         for &key in &all_keys {
-            let (_, field_type) =
-                config
-                    .fields
-                    .iter()
-                    .find(|(field, _)| field == key)
-                    .ok_or(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Secondary key must be present in the field schema",
-                    ))?;
+            let (_, RecordField { field_type, .. }) = config
+                .fields
+                .iter()
+                .find(|(field, _)| field == key)
+                .ok_or(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Secondary key must be present in the field schema",
+                ))?;
 
             match field_type {
                 RecordFieldType::Int | RecordFieldType::String => {}
@@ -280,19 +279,42 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
 
         // Validate that record fields match schema types
-        // TODO: handle Null
-        for (i, (_, field_type)) in self.config.fields.iter().enumerate() {
-            match (&record.values[i], field_type) {
-                (RecordValue::Int(_), RecordFieldType::Int) => {}
-                (RecordValue::Float(_), RecordFieldType::Float) => {}
-                (RecordValue::String(_), RecordFieldType::String) => {}
-                (RecordValue::Bytes(_), RecordFieldType::Bytes) => {}
+        for (i, (_, field)) in self.config.fields.iter().enumerate() {
+            match (&record.values[i], field) {
+                (
+                    RecordValue::Null,
+                    RecordField {
+                        nullable: true,
+                        field_type: _,
+                    },
+                ) => {}
+                (
+                    RecordValue::Int(_),
+                    RecordField {
+                        field_type: RecordFieldType::Int,
+                        ..
+                    },
+                ) => {}
+                (
+                    RecordValue::String(_),
+                    RecordField {
+                        field_type: RecordFieldType::String,
+                        ..
+                    },
+                ) => {}
+                (
+                    RecordValue::Bytes(_),
+                    RecordField {
+                        field_type: RecordFieldType::Bytes,
+                        ..
+                    },
+                ) => {}
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
                             "Record field {} has incorrect type: {:?}, expected {:?}",
-                            &i, &record.values[i], &field_type
+                            &i, &record.values[i], &field.field_type
                         ),
                     ))
                 }
