@@ -5,9 +5,9 @@ use std::fmt::Debug;
 use std::io;
 
 // Function to generate a random integer
-pub fn random_int() -> i64 {
+pub fn random_int(from: i64, to: i64) -> i64 {
     let mut rng = rand::thread_rng();
-    rng.gen_range(0..1000) // Random number between 0 and 1000
+    rng.gen_range(from..to)
 }
 
 // Function to generate a random string
@@ -23,22 +23,22 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 }
 
 // Function to generate a random record
-pub fn random_record() -> Record {
+pub fn random_record(from_id: i64, to_id: i64) -> Record {
     Record {
         values: vec![
-            RecordValue::Int(random_int()),        // Random int value
-            RecordValue::String(random_string(5)), // Random string of length 5
-            RecordValue::Bytes(random_bytes(10)),  // Random bytes of length 10
+            RecordValue::Int(random_int(from_id, to_id)), // Random int value between 0..1000
+            RecordValue::String(random_string(5)),        // Random string of length 5
+            RecordValue::Bytes(random_bytes(10)),         // Random bytes of length 10
         ],
     }
 }
 
-pub fn prefill_db_with_n_records<T: Eq + Clone + Debug>(
+pub fn prefill_db<T: Eq + Clone + Debug>(
     db: &mut DB<T>,
-    n: usize,
+    n_records: usize,
 ) -> Result<(), io::Error> {
-    for _ in 0..n {
-        let record = random_record();
+    for _ in 0..n_records {
+        let record = random_record(0, n_records as i64);
         db.upsert(&record)?;
     }
 

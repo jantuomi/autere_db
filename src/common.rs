@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::fs::{metadata, File};
 use std::io::{self};
 use std::path::PathBuf;
@@ -82,6 +83,13 @@ pub enum WriteDurability {
     /// Changes are written to the OS write buffer and synced to disk immediately.
     /// Offers the best durability guarantees but is the slowest.
     FlushSync,
+}
+
+impl Display for WriteDurability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "{:?}", self)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
