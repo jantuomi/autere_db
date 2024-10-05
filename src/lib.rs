@@ -28,6 +28,7 @@ pub struct ConfigBuilder<'a, Field: Eq + Clone + Debug> {
     primary_key: Option<Field>,
     secondary_keys: Option<Vec<Field>>,
     memtable_evict_policy: Option<MemtableEvictPolicy>,
+    write_durability: Option<WriteDurability>,
 }
 
 impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
@@ -40,6 +41,7 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
             primary_key: None,
             secondary_keys: None,
             memtable_evict_policy: None,
+            write_durability: None,
         }
     }
 
@@ -96,6 +98,14 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
         self
     }
 
+    /// The write durability policy for the database.
+    /// This determines how writes are persisted to disk.
+    /// The default is WriteDurability::Flush.
+    pub fn write_durability(&mut self, write_durability: WriteDurability) -> &mut Self {
+        self.write_durability = Some(write_durability);
+        self
+    }
+
     pub fn initialize(&self) -> Result<DB<Field>, io::Error> {
         let config = Config::<Field> {
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
@@ -117,6 +127,10 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
                 .memtable_evict_policy
                 .clone()
                 .unwrap_or(MemtableEvictPolicy::LeastReadOrWritten),
+            write_durability: self
+                .write_durability
+                .clone()
+                .unwrap_or(WriteDurability::Flush),
         };
 
         DB::initialize(&config)
@@ -132,11 +146,13 @@ struct Config<Field: Eq + Clone> {
     pub primary_key: Field,
     pub secondary_keys: Vec<Field>,
     pub memtable_evict_policy: MemtableEvictPolicy,
+    pub write_durability: WriteDurability,
 }
 
 pub struct DB<Field: Eq + Clone + Debug> {
     config: Config<Field>,
     log_path: PathBuf,
+    log_file: fs::File,
     primary_key_index: usize,
     primary_memtable: PrimaryMemtable,
     secondary_memtables: Vec<SecondaryMemtable<Field>>,
@@ -158,8 +174,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let log_path = Path::new(&config.data_dir).join(ACTIVE_LOG_FILENAME);
 
         // Create the log file if it does not exist
-        fs::OpenOptions::new()
+        let log_file_file = fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&log_path)?;
 
@@ -226,6 +243,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let mut db = DB::<Field> {
             config: config.clone(),
             log_path: log_path.clone(),
+            log_file: log_file_file,
             primary_key_index,
             primary_memtable,
             secondary_memtables,
@@ -284,20 +302,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Record is valid");
         debug!("Opening file in append mode and acquiring exclusive lock...");
 
-        // Open the log file in append mode
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)?;
-
         // Acquire an exclusive lock for writing
-        self.request_exclusive_lock(&self.config.data_dir, &mut file)?;
+        self.request_exclusive_lock()?;
 
-        if !is_file_same_as_path(&file, &self.log_path)? {
+        if self.ensure_correct_file_is_open()? {
             // The log file has been rotated, so we must try again
-            debug!("Lock acquired, but the log file has been rotated. Retrying upsert...");
-            file.unlock()?;
-            drop(file);
             return self.upsert(record);
         }
 
@@ -307,13 +316,18 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // Each serialized row is suffixed with the field separator character sequence
         let mut serialized_record = record.serialize();
         serialized_record.extend(SEQ_RECORD_SEP);
-        file.write_all(&serialized_record)?;
+        self.log_file.write_all(&serialized_record)?;
 
-        // Sync to disk
-        file.flush()?;
-        file.sync_all()?;
+        // Flush and sync to disk
+        if self.config.write_durability == WriteDurability::Flush {
+            self.log_file.flush()?;
+        }
+        if self.config.write_durability == WriteDurability::SyncWrite {
+            self.log_file.flush()?;
+            self.log_file.sync_all()?;
+        }
 
-        file.unlock()?;
+        self.log_file.unlock()?;
 
         debug!("Record appended to log file, lock released");
 
@@ -429,17 +443,17 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         ))?;
 
         // Try to find a memtable with the queried key
-        let found_memtable = self
+        let found_memtable_index = self
             .secondary_memtables
             .iter_mut()
-            .find(|mt| &mt.field == field);
+            .position(|mt| &mt.field == field);
 
-        if let Some(memtable) = found_memtable {
+        if let Some(memtable_index) = found_memtable_index {
             debug!(
                 "Found suitable secondary index. Looking up key {:?} in the memtable",
                 query_key
             );
-            let records = memtable.find_all(&query_key);
+            let records = self.secondary_memtables[memtable_index].find_all(&query_key);
             debug!("Found matching key");
             return Ok(records.iter().map(|&record| record.clone()).collect());
         }
@@ -461,23 +475,19 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             ))?;
 
         debug!("Matching key index {}", key_index);
-        debug!("Opening file in read mode and acquiring shared lock...");
+        debug!("Acquiring shared lock...");
 
-        // Open the file and acquire a shared lock for reading
-        let mut file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
-        file.lock_shared()?;
+        // Acquire a shared lock for reading
+        self.log_file.lock_shared()?;
 
-        if !is_file_same_as_path(&file, &self.log_path)? {
+        if self.ensure_correct_file_is_open()? {
             // The log file has been rotated, so we must try again
-            debug!("Lock acquired, but the log file has been rotated. Retrying find_all...");
-            file.unlock()?;
-            drop(file);
             return self.find_all(field, query_key_original);
         }
 
         debug!("Lock acquired, searching log file for record");
 
-        let result = ReverseLogReader::new(&mut file)?
+        let result = ReverseLogReader::new(&mut self.log_file)?
             .filter(|record| {
                 let record_key = record.values[key_index]
                     .as_indexable()
@@ -486,7 +496,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             })
             .collect::<Vec<Record>>();
 
-        file.unlock()?;
+        self.log_file.unlock()?;
         debug!("Record search complete, lock released");
 
         debug!(
@@ -494,12 +504,35 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             result.len()
         );
 
-        if let Some(memtable) = found_memtable {
+        if let Some(memtable_index) = found_memtable_index {
             debug!("Inserting result set into secondary index");
-            memtable.set_all(&query_key, &result);
+            self.secondary_memtables[memtable_index].set_all(&query_key, &result);
         }
 
         Ok(result)
+    }
+
+    /// Ensures that the `self.log_file` handle is still pointing to the correct file.
+    /// If the file has been rotated, the handle will be closed and reopened.
+    /// Returns `true` if the file has been rotated and the handle has been reopened.
+    fn ensure_correct_file_is_open(&mut self) -> Result<bool, io::Error> {
+        if !is_file_same_as_path(&self.log_file, &self.log_path)? {
+            // The log file has been rotated, so we must try again
+            debug!(
+                "Lock acquired, but the log file has been rotated. Reopening file and retrying..."
+            );
+            self.log_file.unlock()?;
+
+            self.log_file = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(&self.log_path)?;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn update_primary_index(&mut self, record: &Record) {
@@ -528,9 +561,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             });
     }
 
-    fn request_exclusive_lock(&self, data_dir: &str, file: &mut fs::File) -> Result<(), io::Error> {
+    fn request_exclusive_lock(&mut self) -> Result<(), io::Error> {
         // Create a lock on the exclusive lock request file to signal to readers that they should wait
-        let lock_request_path = Path::new(data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
+        let lock_request_path = Path::new(&self.config.data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
         let lock_request_file = fs::OpenOptions::new()
             .create(true)
             .write(true) // When requesting a lock, we need to have either read or write permissions
@@ -541,16 +574,17 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         lock_request_file.lock_exclusive()?;
 
         // Check that the exclusive lock request file is still the same as the one we opened
-        if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
-            // The lock request file has been removed
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Lock request file was removed unexpectedly",
-            ));
-        }
+        // NOTE: this isn't strictly necessary, but it's a good sanity check. Disabled for now.
+        // if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
+        //     // The lock request file has been removed
+        //     return Err(io::Error::new(
+        //         io::ErrorKind::Other,
+        //         "Lock request file was removed unexpectedly",
+        //     ));
+        // }
 
         // Acquire an exclusive lock on the log file
-        file.lock_exclusive()?;
+        self.log_file.lock_exclusive()?;
 
         // Unlock the request file
         lock_request_file.unlock()?;

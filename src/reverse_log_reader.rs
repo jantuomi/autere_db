@@ -61,11 +61,12 @@ impl<'a> ReverseLogReader<'a> {
         self.consumed_record_sep = false;
 
         let mut result_buf: Vec<u8> = vec![];
+        let mut read_buf = Vec::with_capacity(INTERNAL_BUF_SIZE);
         loop {
-            let mut read_buf = vec![];
-            let _read = self.read_until(ESCAPE_CHARACTER, &mut read_buf)?;
+            read_buf.clear();
+            let read = self.read_until(ESCAPE_CHARACTER, &mut read_buf)?;
 
-            result_buf.extend(&read_buf);
+            result_buf.extend(&read_buf[..read]);
 
             if self.file.stream_position()? == 0 && self.internal_pos == 0 {
                 // We read until the start of the file, we are done

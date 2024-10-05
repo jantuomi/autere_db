@@ -69,6 +69,20 @@ pub enum MemtableEvictPolicy {
     LeastReadOrWritten,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum WriteDurability {
+    /// Changes are written to an application-level write buffer without flushing to the OS write buffer or syncing to disk.
+    /// Offers the lowest durability guarantees but is very fast.
+    AsyncWrite,
+    /// Changes are written to the OS write buffer but not synced to disk.
+    /// Offers better durability guarantees than AsyncWrite but is slower.
+    /// This is generally recommended. Most OSes will sync the write buffer to disk within a few seconds.
+    Flush,
+    /// Changes are written to the OS write buffer and synced to disk.
+    /// Offers the best durability guarantees but is the slowest.
+    SyncWrite,
+}
+
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum IndexableValue {
     Int(i64),
