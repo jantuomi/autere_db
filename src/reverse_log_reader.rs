@@ -3,6 +3,7 @@ use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom};
 
 pub struct ReverseLogReader<'a> {
+    /// The file to read from end to beginning.
     file: &'a mut fs::File,
     /// The internal buffer used to read from the file.
     /// It is populated with the last INTERNAL_BUF_SIZE bytes read from the file
@@ -13,16 +14,21 @@ pub struct ReverseLogReader<'a> {
     /// is populated with the next (= closer to the start of the file) INTERNAL_BUF_SIZE bytes from the file.
     /// Note: This is the index of the next byte to be read from the internal buffer + 1
     internal_pos: usize,
+    /// A flag indicating whether the record separator at the cursor position has been consumed.
+    /// Useful to avoid consuming the separator once when reading until an escape character, and
+    /// a second time when reading a new record and validating it ends in a separator.
     consumed_record_sep: bool,
 }
 
-const INTERNAL_BUF_SIZE: usize = 4096;
+// This value is based on the reverse_read_file_with_various_buffer_sizes benchmark.
+// Greater values yield little to no performance improvement.
+const DEFAULT_INTERNAL_BUF_SIZE: usize = 32768;
 impl<'a> ReverseLogReader<'a> {
     pub fn new(file: &mut fs::File) -> Result<ReverseLogReader, io::Error> {
         file.seek(SeekFrom::End(0))?;
         Ok(ReverseLogReader {
             file,
-            internal_buf: vec![0; INTERNAL_BUF_SIZE],
+            internal_buf: vec![0; DEFAULT_INTERNAL_BUF_SIZE],
             internal_pos: 0,
             consumed_record_sep: false,
         })
@@ -61,7 +67,7 @@ impl<'a> ReverseLogReader<'a> {
         self.consumed_record_sep = false;
 
         let mut result_buf: Vec<u8> = vec![];
-        let mut read_buf = Vec::with_capacity(INTERNAL_BUF_SIZE);
+        let mut read_buf = Vec::with_capacity(self.internal_buf.len());
         loop {
             read_buf.clear();
             let read = self.read_until(ESCAPE_CHARACTER, &mut read_buf)?;
