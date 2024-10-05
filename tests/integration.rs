@@ -4,9 +4,11 @@ extern crate tempfile;
 use ctor::ctor;
 use env_logger;
 use log::debug;
-use log_db::{self, RecordField};
+use log_db::{
+    self, ForwardLogReader, RecordField, ACTIVE_LOG_FILENAME, SEQ_LIT_ESCAPE, SEQ_RECORD_SEP,
+};
 use log_db::{Record, RecordValue, DB, TEST_RESOURCES_DIR};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -460,7 +462,6 @@ fn test_one_writer_and_multiple_reading_threads() {
 #[test]
 fn test_literal_escape_is_escaped() {
     let data_dir = tmp_dir();
-    debug!("data_dir: {:?}", data_dir);
 
     let mut db = DB::configure()
         .data_dir(&data_dir)
@@ -493,4 +494,62 @@ fn test_literal_escape_is_escaped() {
     };
 
     assert_eq!(received, &vec![0x1A, 0x1B, 0x1C, 0x1D]);
+}
+
+#[test]
+fn test_log_is_rotated_when_capacity_reached() {
+    let data_dir = tmp_dir();
+
+    let record = Record {
+        values: vec![RecordValue::Int(1), RecordValue::Bytes(vec![1, 2, 3, 4])],
+    };
+    let record_len = &record.serialize().len() + SEQ_RECORD_SEP.len();
+
+    let mut db = DB::configure()
+        .data_dir(&data_dir)
+        .memtable_capacity(0) // disable memtables
+        .segment_size(10 * record_len) // small log segment size
+        .fields(&vec![
+            (Field::Id, RecordField::int()),
+            (Field::Data, RecordField::bytes()),
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert more records than fits the capacity
+    for _ in 0..25 {
+        db.upsert(&record).expect("Failed to upsert record");
+
+        db.do_maintenance_tasks()
+            .expect("Failed to do maintenance tasks");
+    }
+
+    // Check that the rotated segments exist
+    assert!(Path::new(&data_dir)
+        .join(ACTIVE_LOG_FILENAME)
+        .with_extension("1")
+        .exists());
+
+    assert!(Path::new(&data_dir)
+        .join(ACTIVE_LOG_FILENAME)
+        .with_extension("2")
+        .exists());
+
+    assert!(!Path::new(&data_dir)
+        .join(ACTIVE_LOG_FILENAME)
+        .with_extension("3")
+        .exists());
+
+    // Check that the active file only contains two rows
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(Path::new(&data_dir).join(ACTIVE_LOG_FILENAME))
+        .expect("File could not be opened");
+    let records_in_active_log = ForwardLogReader::new(&mut file).count();
+    assert_eq!(records_in_active_log, 5);
+
+    // Look for nonexistant record to scan all segment files
+    let found = db.get(&RecordValue::Int(2)).expect("Failed to get record");
+    assert!(found.is_none());
 }

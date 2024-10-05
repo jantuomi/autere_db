@@ -17,6 +17,7 @@ use secondary_memtable::SecondaryMemtable;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 
@@ -396,7 +397,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // Open the file and acquire a shared lock for reading
         let mut file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
 
-        self.request_shared_lock(&self.config.data_dir, &mut file)?;
+        self.request_shared_lock(&mut file)?;
 
         if !is_file_same_as_path(&file, &self.log_path)? {
             // The log file has been rotated, so we must try again
@@ -406,20 +407,49 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             return self.get(query_key_original);
         }
 
-        debug!("Lock acquired, searching log file for record");
+        debug!("Lock acquired, searching log files for record");
 
-        let mut reverse_log_reader = ReverseLogReader::new(&mut file)?;
-        let result = reverse_log_reader.find(|record| {
-            let record_key = record.values[self.primary_key_index]
-                .as_indexable()
-                .expect("A non-indexable value was stored at key index");
-            record_key == query_key
-        });
+        let segment_numbers = self.segment_numbers()?;
+        let mut result: Option<Record> = None;
+        for &n in &segment_numbers {
+            if n == 0 {
+                debug!("Searching the active log file...");
+                result = ReverseLogReader::new(&mut file)?.find(|record| {
+                    let record_key = record.values[self.primary_key_index]
+                        .as_indexable()
+                        .expect("A non-indexable value was stored at key index");
+                    record_key == query_key
+                });
 
-        file.unlock()?;
-        debug!("Record search complete, lock released");
+                debug!("Active log file searched, releasing shared lock...");
+                file.unlock()?;
+            } else {
+                debug!("Locking and searching rotated log segment file {}...", n);
+                let path = Path::new(&self.config.data_dir)
+                    .join(ACTIVE_LOG_FILENAME)
+                    .with_extension(n.to_string());
 
-        let result_value = match result {
+                let mut segm_file = fs::OpenOptions::new().read(true).open(&path)?;
+                self.request_shared_lock(&mut segm_file)?;
+                result = ReverseLogReader::new(&mut segm_file)?.find(|record| {
+                    let record_key = record.values[self.primary_key_index]
+                        .as_indexable()
+                        .expect("A non-indexable value was stored at key index");
+                    record_key == query_key
+                });
+
+                debug!("Segment file searched, releasing shared lock...");
+                segm_file.unlock()?;
+            };
+
+            if result.is_some() {
+                break;
+            }
+        }
+
+        debug!("Record search complete");
+
+        let result_value = match &result {
             Some(record) => record,
             None => {
                 debug!("No record found for key {:?}", query_key);
@@ -435,7 +465,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Updating secondary memtables");
         self.update_secondary_indexes(&result_value);
 
-        Ok(Some(result_value))
+        Ok(result)
     }
 
     /// Get a collection of records based on a field value.
@@ -646,11 +676,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
     }
 
-    fn request_shared_lock(&self, data_dir: &str, file: &mut fs::File) -> Result<(), io::Error> {
+    fn request_shared_lock(&self, file: &mut fs::File) -> Result<(), io::Error> {
         const SHARED_LOCK_WAIT_MAX_MS: u64 = 100;
         let mut timeout = 5;
         loop {
-            if self.is_exclusive_lock_requested(data_dir)? {
+            if self.is_exclusive_lock_requested(&self.config.data_dir)? {
                 debug!("Exclusive lock requested, waiting for {}ms before requesting a shared lock again", timeout);
                 thread::sleep(std::time::Duration::from_millis(timeout));
                 timeout = std::cmp::min(timeout * 2, SHARED_LOCK_WAIT_MAX_MS);
@@ -659,5 +689,106 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 return Ok(());
             }
         }
+    }
+
+    /// Check if there are any pending tasks and do them. Tasks include:
+    /// - Rotating the active log file if it has reached capacity and compacting it.
+    ///
+    /// This function should be called periodically to ensure that the database remains in an optimal state.
+    /// Note that this function is synchronous and may block for a relatively long time.
+    /// You may call this function in a separate thread or process to avoid blocking the main thread.
+    /// However, the database will be exclusively locked, so all writes will be blocked during the tasks.
+    pub fn do_maintenance_tasks(&mut self) -> Result<(), io::Error> {
+        let active_log_path = Path::new(&self.config.data_dir).join(ACTIVE_LOG_FILENAME);
+        let active_log_md = fs::metadata(&active_log_path)?;
+
+        if active_log_md.size() >= self.config.segment_size as u64 {
+            // Rotate the active log file
+
+            debug!("Starting rotation, requesting exclusive lock...");
+            self.request_exclusive_lock()?;
+
+            debug!("Exclusive lock acquired, rotating active log file...");
+            let next_segment_number = self.next_segment_number()?;
+            let next_segment_path =
+                &active_log_path.with_extension(next_segment_number.to_string());
+
+            debug!("Renaming active log file to {:?}", &next_segment_path);
+            fs::rename(&active_log_path, &next_segment_path)?;
+
+            // Create a new active log file
+            self.log_file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(&active_log_path)?;
+
+            // The new active log file is not locked by this client so it cannot be touched.
+            // Compact the rotated segment.
+
+            debug!("Active log file rotated");
+
+            // TODO compaction of rotated segments
+        }
+
+        Ok(())
+    }
+
+    fn next_segment_number(&self) -> Result<u64, io::Error> {
+        match self.segment_numbers()?.iter().max() {
+            Some(greatest) => Ok(greatest + 1),
+            None => Ok(1),
+        }
+    }
+
+    /// Query the filesystem to get the numbers of existing segments
+    /// in the intended reading order: first the active log (signaled with 0),
+    /// then the segments from the greatest ordinal (newest) to the least (oldest).
+    /// E.g. `vec![0, 4, 3, 2, 1]`.
+    fn segment_numbers(&self) -> Result<Vec<u64>, io::Error> {
+        // TODO: optimize the vecs out of here
+        let files = fs::read_dir(&self.config.data_dir)?;
+        let mut nums: Vec<u64> = files
+            .filter_map(|f| {
+                let f_path = match f {
+                    Ok(f) => f.path(),
+                    Err(_) => return None,
+                };
+
+                if !f_path.is_file() {
+                    return None;
+                }
+
+                let name = &f_path
+                    .with_extension("")
+                    .file_name()
+                    .expect("File did not have a name?")
+                    .to_str()
+                    .expect("Failed to convert file name to string")
+                    .to_string();
+
+                if name != ACTIVE_LOG_FILENAME {
+                    return None;
+                }
+
+                let ext = match f_path.extension() {
+                    Some(ext) => ext,
+                    None => return None,
+                };
+
+                let ext_num = ext
+                    .to_str()
+                    .expect("Extension was not a valid UTF-8 string")
+                    .parse::<u64>()
+                    .expect("Extension was not a valid number");
+
+                Some(ext_num)
+            })
+            .collect();
+
+        nums.sort();
+        nums.push(0);
+        nums.reverse();
+        Ok(nums)
     }
 }
