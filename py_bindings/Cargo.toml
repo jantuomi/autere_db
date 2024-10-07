@@ -1,0 +1,11 @@
+[package]
+name = "py_bindings"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+log_db = { path = "../log_db" }
+pyo3 = "0.22.3"
