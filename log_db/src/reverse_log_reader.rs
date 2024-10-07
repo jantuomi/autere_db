@@ -194,7 +194,7 @@ impl<'a> ReverseLogReader<'a> {
 }
 
 #[cfg(test)]
-mod reverse_reader_tests {
+mod tests {
     use super::*;
     use std::io::Write;
     use std::path::Path;

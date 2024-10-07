@@ -88,7 +88,7 @@ impl Iterator for ForwardLogReader<'_> {
 }
 
 #[cfg(test)]
-mod reverse_reader_tests {
+mod tests {
     use super::*;
     use std::path::Path;
 

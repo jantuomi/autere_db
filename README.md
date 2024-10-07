@@ -37,6 +37,8 @@ Add LogDB as a dependency in your `Cargo.toml`.
 log_db = { git = "https://github.com/jantuomi/log_db.git" }
 ```
 
+Then use it in your code like so:
+
 ```rust
 use log_db::*;
 
@@ -86,6 +88,7 @@ To build the Python bindings, run:
 cd py_bindings
 python -m venv venv
 . venv/bin/activate
+pip install maturin
 maturin develop             # for the development version, or
 maturin build --release     # for the release version
 ```
