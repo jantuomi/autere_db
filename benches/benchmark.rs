@@ -17,7 +17,7 @@ enum Field {
 pub fn upsert_various_initial_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert_various_initial_sizes");
 
-    for size in [0, 10, 100, 1000, 10000] {
+    for size in [100, 1000, 10000, 100_000, 1_000_000, 10_000_000] {
         let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
         let data_dir = &data_dir_obj
             .path()
@@ -37,7 +37,7 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
-                let record = random_record(0, size as i64);
+                let record = random_record(0, size as i64 + 1);
                 let _ = db.upsert(black_box(&record));
             });
         });
