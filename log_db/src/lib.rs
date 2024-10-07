@@ -46,15 +46,16 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         }
     }
 
-    /// Directory where the database will store its data.
+    /// The directory where the database will store its data.
     pub fn data_dir(&mut self, data_dir: &str) -> &mut Self {
         self.data_dir = Some(data_dir.to_string());
         self
     }
 
     /// The maximum size of a segment file in bytes.
-    /// Once a segment file reaches this size, it is closed and a new one is created.
-    /// Closed segment files can be compacted.
+    /// Once a segment file reaches this size, it can be closed, rotated and compacted.
+    /// Note that this is not a hard limit: if `db.do_maintenance_tasks()` is not called,
+    /// the segment file may continue to grow.
     pub fn segment_size(&mut self, segment_size: usize) -> &mut Self {
         self.segment_size = Some(segment_size);
         self
