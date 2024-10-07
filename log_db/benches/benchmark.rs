@@ -25,7 +25,7 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(&vec![
+            .fields(vec![
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
                 (Field::Data, RecordField::bytes()),
@@ -60,7 +60,7 @@ pub fn upsert_write_durability(c: &mut Criterion) {
                 .expect("Failed to convert tmpdir path to str");
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(&vec![
+                .fields(vec![
                     (Field::Id, RecordField::int()),
                     (Field::Name, RecordField::string()),
                     (Field::Data, RecordField::bytes()),
@@ -90,7 +90,7 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
         let mut db = DB::configure()
             .data_dir(&data_dir)
             .memtable_capacity(0)
-            .fields(&vec![
+            .fields(vec![
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
                 (Field::Data, RecordField::bytes()),
@@ -122,7 +122,7 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
     // Create a db instance for prefilling
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(&vec![
+        .fields(vec![
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),
@@ -140,7 +140,7 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(&vec![
+                .fields(vec![
                     (Field::Id, RecordField::int()),
                     (Field::Name, RecordField::string()),
                     (Field::Data, RecordField::bytes()),
@@ -175,7 +175,7 @@ fn reverse_read_file_with_various_buffer_sizes(c: &mut Criterion) {
     // Create a db instance for prefilling
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(&vec![
+        .fields(vec![
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),

@@ -21,19 +21,19 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-pub struct ConfigBuilder<'a, Field: Eq + Clone + Debug> {
+pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
     memtable_capacity: Option<usize>,
-    fields: Option<&'a Vec<(Field, RecordField)>>,
+    fields: Option<Vec<(Field, RecordField)>>,
     primary_key: Option<Field>,
     secondary_keys: Option<Vec<Field>>,
     memtable_evict_policy: Option<MemtableEvictPolicy>,
     write_durability: Option<WriteDurability>,
 }
 
-impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
-    pub fn new() -> ConfigBuilder<'a, Field> {
+impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
+    pub fn new() -> ConfigBuilder<Field> {
         ConfigBuilder::<Field> {
             data_dir: None,
             segment_size: None,
@@ -68,8 +68,8 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
     }
 
     /// The field schema of the database.
-    pub fn fields(&mut self, fields: &'a Vec<(Field, RecordField)>) -> &mut Self {
-        self.fields = Some(fields);
+    pub fn fields(&mut self, fields: Vec<(Field, RecordField)>) -> &mut Self {
+        self.fields = Some(fields.clone());
         self
     }
 
@@ -114,6 +114,7 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<'a, Field> {
             memtable_capacity: self.memtable_capacity.unwrap_or(1_000_000),
             fields: self
                 .fields
+                .as_ref()
                 .ok_or(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "Required config value \"fields\" is not set",
@@ -161,7 +162,7 @@ pub struct DB<Field: Eq + Clone + Debug> {
 
 impl<Field: Eq + Clone + Debug> DB<Field> {
     /// Create a new database configuration builder.
-    pub fn configure() -> ConfigBuilder<'static, Field> {
+    pub fn configure() -> ConfigBuilder<Field> {
         ConfigBuilder::new()
     }
 
