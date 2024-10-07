@@ -232,14 +232,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let secondary_memtables = config
             .secondary_keys
             .iter()
-            .map(|key| {
-                SecondaryMemtable::new(
-                    key,
-                    primary_key_index,
-                    config.memtable_capacity,
-                    config.memtable_evict_policy.clone(),
-                )
-            })
+            .map(|key| SecondaryMemtable::new(key))
             .collect();
 
         let mut db = DB::<Field> {
@@ -507,9 +500,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 "Found suitable secondary index. Looking up key {:?} in the memtable",
                 query_key
             );
-            let records = self.secondary_memtables[memtable_index].find_all(&query_key);
+            let records = self.secondary_memtables[memtable_index]
+                .find_all(&self.primary_memtable, &query_key);
             debug!("Found matching key");
-            return Ok(records.iter().map(|&record| record.clone()).collect());
+            return Ok(records.iter().map(|record| record.clone()).collect());
         }
 
         debug!(
@@ -560,7 +554,15 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         if let Some(memtable_index) = found_memtable_index {
             debug!("Inserting result set into secondary index");
-            self.secondary_memtables[memtable_index].set_all(&query_key, &result);
+            let primary_values: Vec<IndexableValue> = result
+                .iter()
+                .map(|r| {
+                    r.values[self.primary_key_index]
+                        .as_indexable()
+                        .expect("A non-indexable value was stored at primary key index")
+                })
+                .collect();
+            self.secondary_memtables[memtable_index].set_all(&query_key, &primary_values);
         }
 
         Ok(result)
@@ -606,10 +608,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 );
                 for (index, (schema_field, _)) in self.config.fields.iter().enumerate() {
                     if schema_field == &secondary_memtable.field {
+                        let primary_key = record.values[self.primary_key_index]
+                            .as_indexable()
+                            .expect("Primary key was not indexable");
                         let key = record.values[index]
                             .as_indexable()
                             .expect("Secondary index key was not indexable");
-                        secondary_memtable.set(&key, record);
+                        secondary_memtable.set(&key, &primary_key);
                     }
                 }
             });

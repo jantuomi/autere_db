@@ -3,15 +3,29 @@ use priority_queue::PriorityQueue;
 use std::collections::BTreeMap;
 
 pub struct PrimaryMemtable {
+    /// Maximum number of records that can be stored in the memtable
+    /// before evicting the oldest records. The oldest record is
+    /// determined by the `evict_policy`.
     capacity: usize,
+    /// Map of records indexed by key. Used as a shared heap of records
+    /// for all secondary memtables also. Secondary memtables store an
+    /// IndexableValue as their record value, which is used to get
+    /// the actual record from the primary memtable `records` map.
+    ///
+    /// Note: it must be invariant that all memtables (primary and secondary)
+    /// contain the same keys.
+    records: BTreeMap<IndexableValue, Record>,
+    /// A max heap priority queue of keys. The record with least priority is evicted
+    /// from the primary memtable and any secondary memtables that reference it, when
+    /// the memtable reaches capacity.
+    ///
+    /// Note: n_operations must be negated upon append to evict oldest values first.
+    evict_queue: PriorityQueue<IndexableValue, i64>,
+    /// Policy for prioritizing records for eviction.
+    evict_policy: MemtableEvictPolicy,
     /// Running counter of memtable operations, used as priority
     /// in evict_queue.
     n_operations: u64,
-    records: BTreeMap<IndexableValue, Record>,
-    /// A max heap priority queue of keys. Note: n_operations must
-    /// be negated upon append to evict oldest values first.
-    evict_queue: PriorityQueue<IndexableValue, i64>,
-    evict_policy: MemtableEvictPolicy,
 }
 
 impl PrimaryMemtable {
@@ -56,6 +70,10 @@ impl PrimaryMemtable {
             self.set_priority(&key);
         }
 
+        self.records.get(key)
+    }
+
+    pub fn get_without_update(&self, key: &IndexableValue) -> Option<&Record> {
         self.records.get(key)
     }
 
