@@ -14,12 +14,14 @@ use fs2::FileExt;
 use primary_memtable::PrimaryMemtable;
 pub use reverse_log_reader::ReverseLogReader;
 use secondary_memtable::SecondaryMemtable;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
+use tempfile;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
@@ -731,11 +733,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 .open(&active_log_path)?;
 
             // The new active log file is not locked by this client so it cannot be touched.
-            // Compact the rotated segment.
-
             debug!("Active log file rotated");
 
-            // TODO compaction of rotated segments
+            // Compact the rotated segment without a lock.
+            // Since the rotated segment and the compacted segment based on it will be
+            // a) read-only, and b) identical in effective content, there is no need to lock it.
+            self.compact_segment(&next_segment_path)?;
+
+            debug!("Segment compacted");
         }
 
         Ok(())
@@ -797,5 +802,41 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         nums.push(0);
         nums.reverse();
         Ok(nums)
+    }
+
+    fn compact_segment(&self, path: &Path) -> Result<(), io::Error> {
+        debug!("Opening segment file {:?} for compaction", path);
+        let mut segment_file = fs::OpenOptions::new().read(true).open(path)?;
+
+        debug!("Reading segment data into a BTreeMap");
+        let mut map = BTreeMap::new();
+        let forward_log_reader = ForwardLogReader::new(&mut segment_file);
+        for entry in forward_log_reader {
+            let primary_key = entry.values[self.primary_key_index]
+                .as_indexable()
+                .expect("Primary key was not indexable");
+            map.insert(primary_key, entry);
+        }
+
+        debug!("Opening temporary file for writing compacted data");
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let temp_path = temp_file.as_ref();
+
+        let mut temp_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(temp_path)?;
+
+        debug!("Writing compacted data to temporary file");
+        for entry in map.values() {
+            let mut serialized = entry.serialize();
+            serialized.extend(SEQ_RECORD_SEP);
+            temp_file.write_all(&serialized)?;
+        }
+
+        debug!("Moving temporary file to replace segment file");
+        fs::rename(&temp_path, path)?;
+
+        Ok(())
     }
 }
