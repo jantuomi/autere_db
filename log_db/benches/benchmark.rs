@@ -33,7 +33,8 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB");
-        prefill_db(&mut db, size).expect("Failed to prefill DB");
+
+        prefill_db(&mut db, size, false).expect("Failed to prefill DB");
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
@@ -69,7 +70,7 @@ pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
             .initialize()
             .expect("Failed to initialize DB");
 
-        prefill_db(&mut db, size).expect("Failed to prefill DB");
+        prefill_db(&mut db, size, true).expect("Failed to prefill DB");
         db.do_maintenance_tasks()
             .expect("Failed to do maintenance tasks");
 
@@ -138,7 +139,39 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB");
-        prefill_db(&mut db, size).expect("Failed to prefill DB");
+        prefill_db(&mut db, size, false).expect("Failed to prefill DB");
+
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
+            b.iter(|| {
+                let id = random_int(0, size as i64 + 1);
+                let _ = db.get(black_box(&RecordValue::Int(id)));
+            });
+        });
+    }
+}
+
+pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
+    let mut group = c.benchmark_group("get_from_disk_various_initial_sizes_compacted");
+
+    for size in [0, 10, 100, 1000, 3300, 6700, 10000, 50000, 100_000] {
+        let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
+        let data_dir = &data_dir_obj
+            .path()
+            .to_str()
+            .expect("Failed to convert tmpdir path to str");
+        let mut db = DB::configure()
+            .data_dir(&data_dir)
+            .memtable_capacity(0)
+            .fields(vec![
+                (Field::Id, RecordField::int()),
+                (Field::Name, RecordField::string()),
+                (Field::Data, RecordField::bytes()),
+            ])
+            .primary_key(Field::Id)
+            .initialize()
+            .expect("Failed to initialize DB");
+
+        prefill_db(&mut db, size, true).expect("Failed to prefill DB");
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
@@ -171,7 +204,7 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
         .initialize()
         .expect("Failed to initialize DB");
 
-    prefill_db(&mut db, PREFILL_N).expect("Failed to prefill DB");
+    prefill_db(&mut db, PREFILL_N, false).expect("Failed to prefill DB");
     drop(db);
 
     // prefill_db generates IDs between 0..1000, so having memtable_capacity = 1000
@@ -224,7 +257,7 @@ fn reverse_read_file_with_various_buffer_sizes(c: &mut Criterion) {
         .initialize()
         .expect("Failed to initialize DB");
 
-    prefill_db(&mut db, PREFILL_N).expect("Failed to prefill DB");
+    prefill_db(&mut db, PREFILL_N, false).expect("Failed to prefill DB");
     drop(db);
 
     for size in buffer_sizes {
@@ -257,6 +290,7 @@ criterion_group!(
     upsert_various_initial_sizes_compacted,
     upsert_write_durability,
     get_from_disk_various_initial_sizes,
+    get_from_disk_various_initial_sizes_compacted,
     get_various_memtable_capacities,
     reverse_read_file_with_various_buffer_sizes,
 );

@@ -36,10 +36,14 @@ pub fn random_record(from_id: i64, to_id: i64) -> Record {
 pub fn prefill_db<T: Eq + Clone + Debug>(
     db: &mut DB<T>,
     n_records: usize,
+    compact: bool,
 ) -> Result<(), io::Error> {
     for _ in 0..n_records {
         let record = random_record(0, n_records as i64);
         db.upsert(&record)?;
+        if compact {
+            db.do_maintenance_tasks()?;
+        }
     }
 
     Ok(())
