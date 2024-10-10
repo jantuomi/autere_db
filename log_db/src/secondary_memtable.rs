@@ -5,17 +5,30 @@ use std::fmt::Debug;
 
 pub struct SecondaryMemtable<Field: Eq + Clone + Debug> {
     pub field: Field,
+    field_index: usize,
+    primary_key_index: usize,
 
     /// Map of records indexed by key. The value is the set of primary key values of records
     /// that have the secondary key value. The actual `Record` objects are stored in the
     /// primary memtable, which acts as the shared heap.
-    records: BTreeMap<IndexableValue, HashSet<IndexableValue>>,
+    pub records: BTreeMap<IndexableValue, HashSet<IndexableValue>>,
 }
 
 impl<Field: Eq + Clone + Debug> SecondaryMemtable<Field> {
-    pub fn new(field: &Field) -> SecondaryMemtable<Field> {
+    pub fn new(
+        field_schema: &Vec<(Field, RecordField)>,
+        field: &Field,
+        primary_key_index: usize,
+    ) -> SecondaryMemtable<Field> {
+        let field_index = field_schema
+            .iter()
+            .position(|(f, _)| f == field)
+            .expect("Field not found in schema");
+
         SecondaryMemtable {
             field: field.clone(),
+            field_index,
+            primary_key_index,
             records: BTreeMap::new(),
         }
     }
@@ -74,6 +87,25 @@ impl<Field: Eq + Clone + Debug> SecondaryMemtable<Field> {
                         .clone()
                 })
                 .collect(),
+        }
+    }
+
+    pub fn remove(&mut self, record: &Record) {
+        let key = record.values[self.field_index]
+            .as_indexable()
+            .expect("Field is not indexable");
+
+        let primary_key = record.values[self.primary_key_index]
+            .as_indexable()
+            .expect("Primary key is not indexable");
+
+        match self.records.get_mut(&key) {
+            Some(set) => {
+                set.remove(&primary_key);
+            }
+            None => {
+                panic!("Record not found in secondary memtable");
+            }
         }
     }
 }

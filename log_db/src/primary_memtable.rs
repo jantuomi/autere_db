@@ -6,7 +6,7 @@ pub struct PrimaryMemtable {
     /// Maximum number of records that can be stored in the memtable
     /// before evicting the oldest records. The oldest record is
     /// determined by the `evict_policy`.
-    capacity: usize,
+    pub capacity: usize,
     /// Map of records indexed by key. Used as a shared heap of records
     /// for all secondary memtables also. Secondary memtables store an
     /// IndexableValue as their record value, which is used to get
@@ -14,7 +14,7 @@ pub struct PrimaryMemtable {
     ///
     /// Note: it must be invariant that all memtables (primary and secondary)
     /// contain the same keys.
-    records: BTreeMap<IndexableValue, Record>,
+    pub records: BTreeMap<IndexableValue, Record>,
     /// A max heap priority queue of keys. The record with least priority is evicted
     /// from the primary memtable and any secondary memtables that reference it, when
     /// the memtable reaches capacity.
@@ -40,20 +40,6 @@ impl PrimaryMemtable {
     }
 
     pub fn set(&mut self, key: &IndexableValue, value: &Record) {
-        if self.capacity == 0 {
-            return;
-        }
-
-        debug!(
-            "Inserting/updating record in primary memtable with key {:?} = {:?}",
-            &key, &value,
-        );
-
-        if self.records.len() >= self.capacity {
-            let (evict_key, _prio) = self.evict_queue.pop().expect("Evict queue was empty");
-            self.records.remove(&evict_key);
-        }
-
         self.records.insert(key.clone(), value.clone());
 
         if self.evict_policy == MemtableEvictPolicy::LeastWritten
@@ -93,5 +79,18 @@ impl PrimaryMemtable {
         let ret = -(self.n_operations as i64);
         self.n_operations += 1;
         ret
+    }
+
+    pub fn evict_if_necessary(&mut self) -> Option<Record> {
+        if self.records.len() >= self.capacity {
+            let (evict_key, _prio) = self.evict_queue.pop().expect("Evict queue was empty");
+            let removed = self
+                .records
+                .remove(&evict_key)
+                .expect("Key was not found in records");
+            Some(removed)
+        } else {
+            None
+        }
     }
 }

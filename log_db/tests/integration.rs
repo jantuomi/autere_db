@@ -10,12 +10,7 @@ use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
-#[ctor]
-fn init_logger() {
-    let _ = env_logger::builder().is_test(true).try_init();
-}
-
-fn tmp_dir() -> String {
+pub fn tmp_dir() -> String {
     let dir = tempdir()
         .expect("Failed to create temporary directory")
         .path()
@@ -24,6 +19,11 @@ fn tmp_dir() -> String {
         .to_string();
     fs::create_dir_all(&dir).expect("Failed to create temporary directory");
     dir
+}
+
+#[ctor]
+fn init_logger() {
+    let _ = env_logger::builder().is_test(true).try_init();
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
