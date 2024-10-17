@@ -217,6 +217,10 @@ The design space here allows for a couple of approaches:
 2. We can specify that the all secondary indexes must contain the full set of
    matching record PKs. This means that a secondary index might have a reference
    to a record that is no longer in the primary index. In this case the log
-   is scanned to find the record (which must exist).
+   is scanned to find the record (which must exist). This has the property that an index lookup is always complete: if there is an index hit, we can be sure that that's all the matching records. If there is no index hit, we know that the results are either not indexed or not in the database. We must do a scan
+   to be sure.
+3. A different design would be to store data in a separate heap and only store
+   references in the indexes. This would require some sort of reference counting
+   or other garbage collection to ensure that the data is removed from the heap when no longer referenced. An index of key -> key mappings is very lightweight: a million records fits in around 20 MB. It's so little that we can probably afford to keep the entire indexes in memory. A database could easily grow to hundreds of millions of records though, so we would still need to have some kind of eviction policy.
 
-LogDB uses the second approach.
+The second approach is chosen for now, although the third one might be the most efficient in the long run.
