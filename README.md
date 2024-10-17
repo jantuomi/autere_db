@@ -18,11 +18,15 @@ LogDB does not support:
 - Schema evolution, other than adding new nullable fields
 
 Possible future features:
+
 - Transactions
+
+See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation of LogDB.
 
 ## Inspiration
 
 The most significant sources of inspiration for LogDB are:
+
 - [SQLite](https://www.sqlite.org/index.html) for its filesystem storage and locking mechanisms.
 - [Designing Data-Intensive Applications (book)](https://www.oreilly.com/library/view/designing-data-intensive-applications/9781491903063/)
   for its excellent overview of database internals and in-depth analysis of log-structured storage.
