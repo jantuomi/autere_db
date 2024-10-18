@@ -224,3 +224,14 @@ The design space here allows for a couple of approaches:
    or other garbage collection to ensure that the data is removed from the heap when no longer referenced. An index of key -> key mappings is very lightweight: a million records fits in around 20 MB. It's so little that we can probably afford to keep the entire indexes in memory. A database could easily grow to hundreds of millions of records though, so we would still need to have some kind of eviction policy.
 
 The second approach is chosen for now, although the third one might be the most efficient in the long run.
+
+## 2024-10-18 In memory heap vs. log offsets
+
+Upon further consideration, the option of not storing data in memory at all but
+instead storing log offsets and segment numbers in the indexes is intriguing. This would allow for a very lightweight index structure, since the log offsets are just 64-bit integers and segment numbers are 16-bit. We can easily store millions of these in memory. We would still have to do eviction, but we could do it based on the segment number + log offset, which is a simple integer comparison. The evicted entry is the least recently written: compare log segment first and then log offset. This would remove the need for a priority queue that is currently in use.
+
+The downside is that we have to do a disk seek to read the record, but this is not that big of a deal, since it is a constant time operation.
+
+See diagram below:
+
+![LogDB indexes with offsets](./logdb_offset_indexes.drawio.svg)
