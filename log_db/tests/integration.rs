@@ -34,7 +34,7 @@ enum Field {
 }
 
 #[test]
-fn test_initialize() {
+fn test_initialize_only() {
     let data_dir = tmp_dir();
     let _db = DB::configure()
         .data_dir(&data_dir)

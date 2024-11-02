@@ -14,6 +14,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::windows::fs::MetadataExt;
 
 pub const ACTIVE_SYMLINK_FILENAME: &str = "active";
+pub const METADATA_FILE_HEADER_SIZE: usize = 24;
 pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const FIELD_SEPARATOR: u8 = b'\x1C';

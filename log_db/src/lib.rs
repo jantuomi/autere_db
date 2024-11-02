@@ -22,6 +22,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use tempfile;
+use tempfile::tempfile_in;
+use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
@@ -153,25 +156,29 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     fn initialize(config: &Config<Field>) -> Result<DB<Field>, io::Error> {
         info!("Initializing DB...");
-        // If data_dir does not exist, create it
-        if !fs::exists(&config.data_dir)? {
-            fs::create_dir_all(&config.data_dir)?;
+        // If data_dir does not exist or is empty, create it and any necessary files
+        // After creation, the directory should always be in a complete state
+        // without missing files.
+        // A tempdir-move strategy is used to achieve one-phase commit.
+        if !fs::exists(&config.data_dir)?
+            || !fs::exists(&Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME))?
+        {
+            let tmpdir = tempfile::tempdir()?;
+            let tmpdir_path = tmpdir.into_path();
+
+            let (segment_uuid, _) = DB::<Field>::create_segment_data_file(&tmpdir_path)?;
+            let (segment_num, _) =
+                DB::<Field>::create_segment_metadata_file(&tmpdir_path, &segment_uuid)?;
+            DB::<Field>::set_active_segment(&tmpdir_path, segment_num)?;
+
+            // Create the exclusive lock request file
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&tmpdir_path.join(EXCL_LOCK_REQUEST_FILENAME))?;
+
+            fs::rename(tmpdir_path, &config.data_dir)?;
         }
-
-        let log_path = Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
-
-        // Create the log file if it does not exist
-        let log_file_file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&log_path)?;
-
-        // Create the exclusive lock request file if it does not exist
-        fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&Path::new(&config.data_dir).join(EXCL_LOCK_REQUEST_FILENAME))?;
 
         // Calculate the index of the primary value in a record
         let primary_key_index = config
@@ -213,22 +220,33 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let secondary_memtables = config
             .secondary_keys
             .iter()
-            .map(|key| SecondaryMemtable::new())
+            .map(|_| SecondaryMemtable::new())
             .collect();
+
+        let active_symlink = Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
+        fs::read_dir(&config.data_dir)?.for_each(|entry| if let Ok(entry) = entry {});
+
+        let active_target = fs::read_link(&active_symlink)?;
+        let log_path = Path::new(&config.data_dir).join(active_target);
+        let log_file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&log_path)?;
+
+        let mut memtable_file = fs::OpenOptions::new().read(true).open(&log_path)?;
 
         let mut db = DB::<Field> {
             config: config.clone(),
-            log_path: log_path.clone(),
-            log_file: log_file_file,
+            log_path,
+            log_file,
             primary_key_index,
             primary_memtable,
             secondary_memtables,
         };
 
         info!("Rebuilding memtable indexes...");
-        let mut file = fs::OpenOptions::new().read(true).open(&log_path)?;
 
-        let forward_log_reader = ForwardLogReader::new(&mut file);
+        let forward_log_reader = ForwardLogReader::new(&mut memtable_file);
         for record in forward_log_reader {
             db.insert_to_memtables(&record);
         }
@@ -381,9 +399,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Lock acquired, searching log files for record");
 
-        let segment_numbers = self.segment_numbers()?;
+        let greatest = DB::<Field>::greatest_segment_number(&Path::new(&self.config.data_dir))?;
+        let segment_numbers = (0..=greatest); // FIXME all of this needs fixing
         let mut result: Option<Record> = None;
-        for &n in &segment_numbers {
+        for n in segment_numbers {
             if n == 0 {
                 debug!("Searching the active log file...");
                 result = ReverseLogReader::new(&mut file)?.find(|record| {
@@ -696,7 +715,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.request_exclusive_lock()?;
 
             debug!("Exclusive lock acquired, rotating active log file...");
-            let next_segment_number = self.next_segment_number()?;
+            let next_segment_number =
+                DB::<Field>::greatest_segment_number(&Path::new(&self.config.data_dir))? + 1;
             let next_segment_path =
                 &active_log_path.with_extension(next_segment_number.to_string());
 
@@ -724,64 +744,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(())
     }
 
-    fn next_segment_number(&self) -> Result<u64, io::Error> {
-        match self.segment_numbers()?.iter().max() {
-            Some(greatest) => Ok(greatest + 1),
-            None => Ok(1),
-        }
-    }
-
-    /// Query the filesystem to get the numbers of existing segments
-    /// in the intended reading order: first the active log (signaled with 0),
-    /// then the segments from the greatest ordinal (newest) to the least (oldest).
-    /// E.g. `vec![0, 4, 3, 2, 1]`.
-    fn segment_numbers(&self) -> Result<Vec<u64>, io::Error> {
-        // TODO: optimize the vecs out of here
-        let files = fs::read_dir(&self.config.data_dir)?;
-        let mut nums: Vec<u64> = files
-            .filter_map(|f| {
-                let f_path = match f {
-                    Ok(f) => f.path(),
-                    Err(_) => return None,
-                };
-
-                if !f_path.is_file() {
-                    return None;
-                }
-
-                let name = &f_path
-                    .with_extension("")
-                    .file_name()
-                    .expect("File did not have a name?")
-                    .to_str()
-                    .expect("Failed to convert file name to string")
-                    .to_string();
-
-                if name != ACTIVE_SYMLINK_FILENAME {
-                    return None;
-                }
-
-                let ext = match f_path.extension() {
-                    Some(ext) => ext,
-                    None => return None,
-                };
-
-                let ext_num = ext
-                    .to_str()
-                    .expect("Extension was not a valid UTF-8 string")
-                    .parse::<u64>()
-                    .expect("Extension was not a valid number");
-
-                Some(ext_num)
-            })
-            .collect();
-
-        nums.sort();
-        nums.push(0);
-        nums.reverse();
-        Ok(nums)
-    }
-
     fn compact_segment(&self, path: &Path) -> Result<(), io::Error> {
         debug!("Opening segment file {:?} for compaction", path);
         let mut segment_file = fs::OpenOptions::new().read(true).open(path)?;
@@ -805,15 +767,110 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .append(true)
             .open(temp_path)?;
 
-        debug!("Writing compacted data to temporary file");
         for entry in map.values() {
             let mut serialized = entry.serialize();
             serialized.extend(SEQ_RECORD_SEP);
             temp_file.write_all(&serialized)?;
         }
 
-        debug!("Moving temporary file to replace segment file");
         fs::rename(&temp_path, path)?;
+
+        Ok(())
+    }
+
+    /// Get the number of the segment with the greatest ordinal.
+    /// This is the newest segment, i.e. the one that is pointed to by the `active` symlink.
+    /// If there are no segments yet, returns 0.
+    fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
+        let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+
+        if !fs::exists(&active_symlink)? {
+            return Ok(0);
+        }
+
+        let segment_metadata_path = fs::read_link(&active_symlink)?;
+        let filename = segment_metadata_path
+            .file_name()
+            .expect("No filename in symlink")
+            .to_str()
+            .expect("Filename was not valid UTF-8");
+
+        // parse number from format "metadata.1"
+        let segment_number = filename
+            .split('.')
+            .last()
+            .expect("Filename did not have a number")
+            .parse::<u16>();
+
+        segment_number.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Failed to parse segment number from filename",
+            )
+        })
+    }
+
+    /// Create a new segment data file and return its UUID.
+    /// A data file contains the segment data, tightly packed without separators.
+    /// An accompanying metadata file is required to interpret the data.
+    fn create_segment_data_file(data_dir_path: &Path) -> Result<(Uuid, PathBuf), io::Error> {
+        let uuid = Uuid::new_v4();
+        let new_segment_path = data_dir_path.join(uuid.to_string());
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&new_segment_path)?;
+
+        Ok((uuid, new_segment_path))
+    }
+
+    /// Create a new segment metadata file and return its number and path.
+    /// A metadata file contains the segment metadata, including the UUID of the data file.
+    /// See `ARCHITECTURE.md` for the file format.
+    fn create_segment_metadata_file(
+        data_dir_path: &Path,
+        data_file_uuid: &Uuid,
+    ) -> Result<(u16, PathBuf), io::Error> {
+        let version = 1u8;
+        let padding = vec![0; 7];
+        let uuid_bytes = data_file_uuid.as_bytes().to_vec();
+
+        let mut header = vec![version];
+        header.extend(padding);
+        header.extend(uuid_bytes);
+
+        assert!(header.len() == METADATA_FILE_HEADER_SIZE);
+
+        let current_greatest_num = DB::<Field>::greatest_segment_number(data_dir_path)?;
+        let new_num = current_greatest_num + 1;
+
+        let metadata_filename = format!("metadata.{}", new_num);
+        let metadata_path = data_dir_path.join(metadata_filename);
+
+        let mut metadata_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&metadata_path)?;
+
+        metadata_file.write_all(&header)?;
+
+        Ok((new_num, metadata_path))
+    }
+
+    /// Set the active segment to the segment with the given ordinal number.
+    fn set_active_segment(data_dir_path: &Path, segment_num: u16) -> Result<(), io::Error> {
+        let tmp_uuid = Uuid::new_v4();
+        let tmp_filename = format!("active_{}", tmp_uuid.to_string());
+        let tmp_path = data_dir_path.join(tmp_filename);
+
+        let metadata_filename = format!("metadata.{}", segment_num);
+        let metadata_path = Path::new(&metadata_filename);
+        let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+
+        symlink(&metadata_path, &tmp_path)?;
+        fs::rename(&tmp_path, &active_symlink)?;
 
         Ok(())
     }
