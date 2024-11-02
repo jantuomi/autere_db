@@ -235,3 +235,54 @@ The downside is that we have to do a disk seek to read the record, but this is n
 See diagram below:
 
 ![LogDB indexes with offsets](./logdb_offset_indexes.drawio.svg)
+
+## 2024-11-02 Opaque handles to metadata files
+
+Taking the previous point further, we can make the index entries mappings from
+key -> (segment number, segment index), and add a segment metadata file that
+maps segment index -> (file offset, file length). This approach would allow us
+to:
+
+- Keep the indexes lightweight (just a `BTreeMap<PK, u64>` or
+  `BTreeMap<SK, Vec<u64>>`)
+- Pack data tightly in the log files with no need for separator byte sequences
+
+On the other hand:
+
+- Full scans now need to iterate over the metadata file and read from the log
+  file based on the metadata row, so two files need to be read instead of one
+
+The new file formats are as follows:
+
+### Metadata files (`metadata.1`, `metadata.2`, ...)
+
+Metadata files are logs of entries that map segment indexes to file offsets. A metadata file begins with a header and followed by a dynamic number of fixed-width entries. The nth entry in the file corresponds to a LogKey index.
+
+Header structure:
+
+| description    | size (bytes) | example                              |
+| -------------- | ------------ | ------------------------------------ |
+| version        | 1            | 0x1                                  |
+| padding        | 7            |                                      |
+| data file uuid | 16           | 5ddd53de-1c61-4916-aadd-67208bbf2bb5 |
+
+Entry structure:
+
+| description | size (bytes) | example |
+| ----------- | ------------ | ------- |
+| offset      | 8            | 0xF0    |
+| length      | 8            | 1024    |
+
+The special `active` file is a symlink to the latest metadata file, and can be used to find it quickly.
+
+### Data files (`5ddd53de-1c61-4916-aadd-67208bbf2bb5`, ...)
+
+Data files are tightly packed records of variable length. Data files can not be read without the corresponding metadata file, which stores information about
+the location of each record in the data file.
+
+The reasoning for this naming scheme (only a UUIDv4) is that rotation can happen
+without two-phase commit: the new data file is created first, then the metadata
+file referencing it is written to a tmp file, and finally the metadata file is
+renamed to the correct name. If the metadata file is not present, the data file is effectively orphaned.
+
+This two-file model means that every time a record is accessed, two locks need to be acquired.
