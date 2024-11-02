@@ -2,18 +2,18 @@
 extern crate log;
 
 mod common;
-mod forward_log_reader;
-mod primary_memtable;
-mod reverse_log_reader;
-mod secondary_memtable;
+mod log_reader_forward;
+mod log_reader_reverse;
+mod memtable_primary;
+mod memtable_secondary;
 
 pub use common::*;
-pub use forward_log_reader::ForwardLogReader;
 use fs2::lock_contended_error;
 use fs2::FileExt;
-use primary_memtable::PrimaryMemtable;
-pub use reverse_log_reader::ReverseLogReader;
-use secondary_memtable::SecondaryMemtable;
+pub use log_reader_forward::ForwardLogReader;
+pub use log_reader_reverse::ReverseLogReader;
+use memtable_primary::PrimaryMemtable;
+use memtable_secondary::SecondaryMemtable;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
@@ -30,7 +30,6 @@ pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     fields: Option<Vec<(Field, RecordField)>>,
     primary_key: Option<Field>,
     secondary_keys: Option<Vec<Field>>,
-    memtable_evict_policy: Option<MemtableEvictPolicy>,
     write_durability: Option<WriteDurability>,
 }
 
@@ -43,7 +42,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
             fields: None,
             primary_key: None,
             secondary_keys: None,
-            memtable_evict_policy: None,
             write_durability: None,
         }
     }
@@ -91,17 +89,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         self
     }
 
-    /// The eviction policy for the memtables. Determines which
-    /// record will be dropped from a memtable when it reaches
-    /// capacity.
-    pub fn memtable_evict_policy(
-        &mut self,
-        memtable_evict_policy: MemtableEvictPolicy,
-    ) -> &mut Self {
-        self.memtable_evict_policy = Some(memtable_evict_policy);
-        self
-    }
-
     /// The write durability policy for the database.
     /// This determines how writes are persisted to disk.
     /// The default is WriteDurability::Flush.
@@ -128,10 +115,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
                 "Required config value \"primary_key\" is not set",
             ))?,
             secondary_keys: self.secondary_keys.clone().unwrap_or(Vec::new()),
-            memtable_evict_policy: self
-                .memtable_evict_policy
-                .clone()
-                .unwrap_or(MemtableEvictPolicy::LeastReadOrWritten),
             write_durability: self
                 .write_durability
                 .clone()
@@ -150,7 +133,6 @@ struct Config<Field: Eq + Clone> {
     pub fields: Vec<(Field, RecordField)>,
     pub primary_key: Field,
     pub secondary_keys: Vec<Field>,
-    pub memtable_evict_policy: MemtableEvictPolicy,
     pub write_durability: WriteDurability,
 }
 
@@ -160,7 +142,7 @@ pub struct DB<Field: Eq + Clone + Debug> {
     log_file: fs::File,
     primary_key_index: usize,
     primary_memtable: PrimaryMemtable,
-    secondary_memtables: Vec<SecondaryMemtable<Field>>,
+    secondary_memtables: Vec<SecondaryMemtable>,
 }
 
 impl<Field: Eq + Clone + Debug> DB<Field> {
@@ -176,7 +158,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             fs::create_dir_all(&config.data_dir)?;
         }
 
-        let log_path = Path::new(&config.data_dir).join(ACTIVE_LOG_FILENAME);
+        let log_path = Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
 
         // Create the log file if it does not exist
         let log_file_file = fs::OpenOptions::new()
@@ -227,14 +209,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 }
             }
         }
-        let primary_memtable = PrimaryMemtable::new(
-            config.memtable_capacity,
-            config.memtable_evict_policy.clone(),
-        );
+        let primary_memtable = PrimaryMemtable::new();
         let secondary_memtables = config
             .secondary_keys
             .iter()
-            .map(|key| SecondaryMemtable::new(&config.fields, key, primary_key_index))
+            .map(|key| SecondaryMemtable::new())
             .collect();
 
         let mut db = DB::<Field> {
@@ -419,7 +398,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             } else {
                 debug!("Locking and searching rotated log segment file {}...", n);
                 let path = Path::new(&self.config.data_dir)
-                    .join(ACTIVE_LOG_FILENAME)
+                    .join(ACTIVE_SYMLINK_FILENAME)
                     .with_extension(n.to_string());
 
                 let mut segm_file = fs::OpenOptions::new().read(true).open(&path)?;
@@ -485,10 +464,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         ))?;
 
         // Try to find a memtable with the queried key
-        let found_memtable_index = self
-            .secondary_memtables
-            .iter_mut()
-            .position(|mt| &mt.field == field);
+        let found_memtable_index = self.get_secondary_memtable_index_by_field(field);
 
         if let Some(memtable_index) = found_memtable_index {
             debug!(
@@ -563,6 +539,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(result)
     }
 
+    fn get_secondary_memtable_index_by_field(&self, field: &Field) -> Option<usize> {
+        self.config
+            .secondary_keys
+            .iter()
+            .position(|schema_field| schema_field == field)
+    }
+
     /// Ensures that the `self.log_file` handle is still pointing to the correct file.
     /// If the file has been rotated, the handle will be closed and reopened.
     /// Returns `true` if the file has been rotated and the handle has been reopened.
@@ -591,7 +574,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .as_indexable()
             .expect("A non-indexable value was stored at key index");
 
-        if self.primary_memtable.capacity == 0 {
+        if self.config.memtable_capacity == 0 {
             return;
         }
 
@@ -600,35 +583,21 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             &key, &record,
         );
 
-        if let Some(evicted) = self.primary_memtable.evict_if_necessary() {
-            self.secondary_memtables
-                .iter_mut()
-                .for_each(|secondary_memtable| {
-                    secondary_memtable.remove(&evicted);
-                });
-        }
-
         self.primary_memtable.set(&key, record);
 
-        self.secondary_memtables
-            .iter_mut()
-            .for_each(|secondary_memtable| {
-                debug!(
-                    "Updating memtable for index on {:?}",
-                    &secondary_memtable.field
-                );
-                for (index, (schema_field, _)) in self.config.fields.iter().enumerate() {
-                    if schema_field == &secondary_memtable.field {
-                        let primary_key = record.values[self.primary_key_index]
-                            .as_indexable()
-                            .expect("Primary key was not indexable");
-                        let key = record.values[index]
-                            .as_indexable()
-                            .expect("Secondary index key was not indexable");
-                        secondary_memtable.set(&key, &primary_key);
-                    }
-                }
-            });
+        for (field_index, value) in record.values.iter().enumerate() {
+            let field = &self.config.fields[field_index].0;
+            if let Some(smt_index) = self.get_secondary_memtable_index_by_field(field) {
+                debug!("Updating memtable for index on {:?}", field);
+
+                let memtable = &mut self.secondary_memtables[smt_index];
+                let key = value.as_indexable().expect("Primary key was not indexable");
+                let primary_key = record.values[self.primary_key_index]
+                    .as_indexable()
+                    .expect("Primary key was not indexable");
+                memtable.set(&key, &primary_key);
+            }
+        }
     }
 
     fn request_exclusive_lock(&mut self) -> Result<(), io::Error> {
@@ -717,7 +686,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// You may call this function in a separate thread or process to avoid blocking the main thread.
     /// However, the database will be exclusively locked, so all writes will be blocked during the tasks.
     pub fn do_maintenance_tasks(&mut self) -> Result<(), io::Error> {
-        let active_log_path = Path::new(&self.config.data_dir).join(ACTIVE_LOG_FILENAME);
+        let active_log_path = Path::new(&self.config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
         let active_log_md = fs::metadata(&active_log_path)?;
 
         if active_log_md.size() >= self.config.segment_size as u64 {
@@ -788,7 +757,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                     .expect("Failed to convert file name to string")
                     .to_string();
 
-                if name != ACTIVE_LOG_FILENAME {
+                if name != ACTIVE_SYMLINK_FILENAME {
                     return None;
                 }
 
@@ -847,70 +816,5 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         fs::rename(&temp_path, path)?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
-    use std::collections::HashSet;
-    use tempfile::tempdir;
-
-    #[derive(Eq, PartialEq, Clone, Debug)]
-    enum Field {
-        Id,
-        Name,
-        Data,
-    }
-
-    fn tmp_dir() -> String {
-        let dir = tempdir()
-            .expect("Failed to create temporary directory")
-            .path()
-            .to_str()
-            .expect("Failed to convert temporary directory path to string")
-            .to_string();
-        fs::create_dir_all(&dir).expect("Failed to create temporary directory");
-        dir
-    }
-
-    #[test]
-    fn memtables_always_have_the_same_primary_keys() {
-        let data_dir = tmp_dir();
-
-        let mut db = DB::configure()
-            .data_dir(&data_dir)
-            .fields(vec![
-                (Field::Id, RecordField::int()),
-                (Field::Name, RecordField::string()),
-            ])
-            .primary_key(Field::Id)
-            .secondary_keys(vec![Field::Name])
-            .initialize()
-            .expect("Failed to initialize DB instance");
-
-        let mut rng = rand::thread_rng();
-        for _ in 0..100 {
-            let id = rng.gen_range(0..100);
-            let name = (0..5).map(|_| rng.sample(Alphanumeric) as char).collect();
-
-            let record = Record {
-                values: vec![RecordValue::Int(id), RecordValue::String(name)],
-            };
-            db.upsert(&record).expect("Failed to upsert record");
-
-            let p_set: HashSet<&IndexableValue> = db.primary_memtable.records.keys().collect();
-            let mut s_set: HashSet<&IndexableValue> = HashSet::new();
-
-            for table in db.secondary_memtables.iter() {
-                table.records.values().for_each(|r| {
-                    s_set.extend(r);
-                });
-            }
-
-            assert_eq!(p_set, s_set);
-        }
     }
 }

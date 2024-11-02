@@ -1,7 +1,9 @@
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::{metadata, File};
 use std::io::{self};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // For Unix-like systems
 #[cfg(unix)]
@@ -11,7 +13,7 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
-pub const ACTIVE_LOG_FILENAME: &str = "db";
+pub const ACTIVE_SYMLINK_FILENAME: &str = "active";
 pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const FIELD_SEPARATOR: u8 = b'\x1C';
@@ -63,11 +65,93 @@ pub enum SpecialSequence {
     LiteralEscape,
 }
 
+/// LogKey is a packed struct that contains:
+/// - a log segment number (16 bits)
+/// - a log index within the segment (48 bits)
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct LogKey(u64);
+
+impl LogKey {
+    pub fn new(segment_num: u16, index: u64) -> Self {
+        assert!(index < (1 << 48), "Index must fit in 48 bits");
+        LogKey((segment_num as u64) << 48 | index)
+    }
+
+    pub fn segment_num(&self) -> u16 {
+        (self.0 >> 48) as u16
+    }
+
+    pub fn index(&self) -> u64 {
+        self.0 & 0x0000_FFFF_FFFF_FFFF
+    }
+}
+
+/// LogKeySet is a non-empty set of LogKeys.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum MemtableEvictPolicy {
-    LeastWritten,
-    LeastRead,
-    LeastReadOrWritten,
+pub struct LogKeySet {
+    set: HashSet<LogKey>,
+}
+
+impl PartialOrd for LogKeySet {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let self_max_elem = self.set.iter().max()?;
+        let other_max_elem = other.set.iter().max()?;
+        Some(self_max_elem.cmp(other_max_elem))
+    }
+}
+
+impl LogKeySet {
+    /// Create a new LogKeySet with an initial LogKey.
+    /// The initial LogKey is required since LogKeySet must be non-empty.
+    pub fn new_with_initial(key: &LogKey) -> Self {
+        let mut set = HashSet::new();
+        set.insert(key.clone());
+        LogKeySet { set }
+    }
+
+    /// Insert a LogKey into the set.
+    pub fn insert(&mut self, key: LogKey) {
+        self.set.insert(key);
+    }
+
+    /// Remove a LogKey from the set. Return Ok(()) if the key was found and removed.
+    /// Return io::Error::InvalidInput if trying to remove the last element.
+    /// Return io::Error::NotFound if the key was not found.
+    pub fn remove(&mut self, key: &LogKey) -> Result<(), io::Error> {
+        if self.set.len() == 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot remove the last element from LogKeySet",
+            ));
+        }
+        let removed = self.set.remove(key);
+
+        if !removed {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "LogKey not found in LogKeySet",
+            ));
+        }
+
+        assert!(
+            self.set.len() > 0,
+            "LogKeySet should not be empty after removal"
+        );
+
+        Ok(())
+    }
+
+    /// Get a reference to the set of LogKeys.
+    pub fn log_keys(&self) -> &HashSet<LogKey> {
+        &self.set
+    }
+}
+
+impl Ord for LogKeySet {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other)
+            .expect("LogKeySet comparison failed, possibly due to empty set")
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -284,6 +368,14 @@ pub fn escape_bytes(buf: &[u8]) -> Vec<u8> {
     result
 }
 
+/// A path to a log segment file along with its type
+pub enum SegmentPath {
+    /// A symbolic link to the active log file
+    ActiveSymlink(String),
+    /// A compacted segment that is no longer being written to
+    Compacted(String),
+}
+
 pub fn is_file_same_as_path(file: &File, path: &PathBuf) -> io::Result<bool> {
     // Get the metadata for the open file handle
     let file_metadata = file.metadata()?;
@@ -304,5 +396,17 @@ pub fn is_file_same_as_path(file: &File, path: &PathBuf) -> io::Result<bool> {
     {
         Ok(file_metadata.file_index() == path_metadata.file_index()
             && file_metadata.volume_serial_number() == path_metadata.volume_serial_number())
+    }
+}
+
+pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(original, link)
+    }
+
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(original, link)
     }
 }

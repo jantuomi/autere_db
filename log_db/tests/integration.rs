@@ -268,7 +268,8 @@ fn test_upsert_and_get_from_secondary_memtable() {
     db.upsert(&record2).unwrap();
 
     // Delete the DB so that any results must come from a memtable
-    fs::remove_file(Path::new(&data_dir).join("db")).expect("Failed to delete the DB log file");
+    fs::remove_file(Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME))
+        .expect("Failed to delete the DB log file");
 
     // There should be 2 Johns
     let johns = db
@@ -285,7 +286,7 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
     fs::create_dir_all(&data_dir).expect("Failed to create the test data directory");
     fs::copy(
         &Path::new(TEST_RESOURCES_DIR).join("test_db2"),
-        &Path::new(&data_dir).join("db"),
+        &Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME),
     )
     .expect("Failed to copy the fixture DB");
 
@@ -301,7 +302,8 @@ fn test_initialize_and_read_from_primary_memtable_fixture_db2() {
         .expect("Failed to initialize DB instance");
 
     // Delete the DB so that any results must come from a memtable
-    fs::remove_file(Path::new(&data_dir).join("db")).expect("Failed to delete the DB log file");
+    fs::remove_file(Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME))
+        .expect("Failed to delete the DB log file");
 
     let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
 
@@ -320,7 +322,7 @@ fn test_initialize_without_memtables_fixture_db3() {
     fs::create_dir_all(&data_dir).expect("Failed to create the test data directory");
     fs::copy(
         &Path::new(TEST_RESOURCES_DIR).join("test_db3"),
-        &Path::new(&data_dir).join("db"),
+        &Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME),
     )
     .expect("Failed to copy the fixture DB");
 
@@ -523,25 +525,25 @@ fn test_log_is_rotated_when_capacity_reached() {
 
     // Check that the rotated segments exist
     assert!(Path::new(&data_dir)
-        .join(ACTIVE_LOG_FILENAME)
+        .join(ACTIVE_SYMLINK_FILENAME)
         .with_extension("1")
         .exists());
 
     assert!(Path::new(&data_dir)
-        .join(ACTIVE_LOG_FILENAME)
+        .join(ACTIVE_SYMLINK_FILENAME)
         .with_extension("2")
         .exists());
 
     // 3rd segment should not exist (note negation)
     assert!(!Path::new(&data_dir)
-        .join(ACTIVE_LOG_FILENAME)
+        .join(ACTIVE_SYMLINK_FILENAME)
         .with_extension("3")
         .exists());
 
     // Check that the active file only contains five rows
     let mut file = OpenOptions::new()
         .read(true)
-        .open(Path::new(&data_dir).join(ACTIVE_LOG_FILENAME))
+        .open(Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME))
         .expect("File could not be opened");
     let records_in_active_log = ForwardLogReader::new(&mut file).count();
     assert_eq!(records_in_active_log, 5);
@@ -553,7 +555,7 @@ fn test_log_is_rotated_when_capacity_reached() {
             .read(true)
             .open(
                 Path::new(&data_dir)
-                    .join(ACTIVE_LOG_FILENAME)
+                    .join(ACTIVE_SYMLINK_FILENAME)
                     .with_extension(i.to_string()),
             )
             .expect("File could not be opened");

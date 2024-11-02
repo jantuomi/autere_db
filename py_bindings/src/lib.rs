@@ -50,12 +50,6 @@ impl RecordField {
 
 #[pyclass]
 #[derive(Clone)]
-struct MemtableEvictPolicy {
-    memtable_evict_policy: log_db::MemtableEvictPolicy,
-}
-
-#[pyclass]
-#[derive(Clone)]
 struct WriteDurability {
     write_durability: log_db::WriteDurability,
 }
@@ -74,8 +68,6 @@ struct Config {
     primary_key: Option<Field>,
     #[pyo3(get, set)]
     secondary_keys: Option<Vec<Field>>,
-    #[pyo3(get, set)]
-    memtable_evict_policy: Option<MemtableEvictPolicy>,
     #[pyo3(get, set)]
     write_durability: Option<WriteDurability>,
 }
@@ -106,10 +98,6 @@ impl Config {
         if self.secondary_keys.is_some() {
             let tmp = self.secondary_keys.as_ref().unwrap();
             config.secondary_keys(tmp.clone());
-        }
-        if self.memtable_evict_policy.is_some() {
-            let tmp = self.memtable_evict_policy.as_ref().unwrap();
-            config.memtable_evict_policy(tmp.memtable_evict_policy.clone());
         }
         if self.write_durability.is_some() {
             let tmp = self.write_durability.as_ref().unwrap();
@@ -208,7 +196,6 @@ impl DB {
             fields: None,
             primary_key: None,
             secondary_keys: None,
-            memtable_evict_policy: None,
             write_durability: None,
         }
     }
