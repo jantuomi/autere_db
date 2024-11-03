@@ -4,6 +4,7 @@ use std::fmt::Display;
 use std::fs::{metadata, File};
 use std::io::{self};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 // For Unix-like systems
 #[cfg(unix)]
@@ -17,47 +18,7 @@ pub const ACTIVE_SYMLINK_FILENAME: &str = "active";
 pub const METADATA_FILE_HEADER_SIZE: usize = 24;
 pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
-pub const FIELD_SEPARATOR: u8 = b'\x1C';
-pub const ESCAPE_CHARACTER: u8 = b'\x1D';
 pub const TEST_RESOURCES_DIR: &str = "tests/resources";
-
-// Special sequences. Note: these must have the same length!
-// Since the log is read both forwards and backwards, we must have a signal
-// character (ESCAPE_CHARACTER) on both sides of the special sequence.
-pub const SEQ_RECORD_SEP: &[u8] = &[
-    ESCAPE_CHARACTER,
-    FIELD_SEPARATOR,
-    FIELD_SEPARATOR,
-    ESCAPE_CHARACTER,
-];
-pub const SEQ_LIT_ESCAPE: &[u8] = &[
-    ESCAPE_CHARACTER,
-    ESCAPE_CHARACTER,
-    ESCAPE_CHARACTER,
-    ESCAPE_CHARACTER,
-];
-pub const SEQ_LIT_FIELD_SEP: &[u8] = &[
-    ESCAPE_CHARACTER,
-    ESCAPE_CHARACTER,
-    FIELD_SEPARATOR,
-    ESCAPE_CHARACTER,
-];
-
-/// There are three special sequences that need to be handled:
-/// Here: SC = escape char, FS = field separator.
-/// - SC FS FS SC  -> actual record separator
-/// - SC SC FS SC  -> literal FS
-/// - SC SC SC SC  -> literal SC
-///
-/// Returns SpecialSequence or None if not valid.
-pub fn validate_special(buf: &[u8]) -> Option<SpecialSequence> {
-    match buf {
-        SEQ_RECORD_SEP => Some(SpecialSequence::RecordSeparator),
-        SEQ_LIT_FIELD_SEP => Some(SpecialSequence::LiteralFieldSeparator),
-        SEQ_LIT_ESCAPE => Some(SpecialSequence::LiteralEscape),
-        _ => None,
-    }
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum SpecialSequence {
@@ -153,6 +114,11 @@ impl Ord for LogKeySet {
         self.partial_cmp(other)
             .expect("LogKeySet comparison failed, possibly due to empty set")
     }
+}
+
+pub struct MetadataHeader {
+    pub version: u8,
+    pub uuid: Uuid,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

@@ -17,7 +17,9 @@ use memtable_secondary::SecondaryMemtable;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
-use std::io::{self, Write};
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -141,8 +143,8 @@ struct Config<Field: Eq + Clone> {
 
 pub struct DB<Field: Eq + Clone + Debug> {
     config: Config<Field>,
-    log_path: PathBuf,
-    log_file: fs::File,
+    active_metadata_file: fs::File,
+    active_data_file: fs::File,
     primary_key_index: usize,
     primary_memtable: PrimaryMemtable,
     secondary_memtables: Vec<SecondaryMemtable>,
@@ -224,32 +226,33 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .collect();
 
         let active_symlink = Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
-        fs::read_dir(&config.data_dir)?.for_each(|entry| if let Ok(entry) = entry {});
 
         let active_target = fs::read_link(&active_symlink)?;
-        let log_path = Path::new(&config.data_dir).join(active_target);
-        let log_file = fs::OpenOptions::new()
+        let active_metadata_path = Path::new(&config.data_dir).join(active_target);
+        let mut active_metadata_file = fs::OpenOptions::new()
             .read(true)
             .append(true)
-            .open(&log_path)?;
+            .open(&active_metadata_path)?;
 
-        let mut memtable_file = fs::OpenOptions::new().read(true).open(&log_path)?;
+        let active_metadata_header = DB::<Field>::read_metadata_header(&mut active_metadata_file)?;
+        let active_data_path =
+            Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
+        let active_data_file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&active_data_path)?;
 
-        let mut db = DB::<Field> {
+        let db = DB::<Field> {
             config: config.clone(),
-            log_path,
-            log_file,
+            active_metadata_file,
+            active_data_file,
             primary_key_index,
             primary_memtable,
             secondary_memtables,
         };
 
-        info!("Rebuilding memtable indexes...");
-
-        let forward_log_reader = ForwardLogReader::new(&mut memtable_file);
-        for record in forward_log_reader {
-            db.insert_to_memtables(&record);
-        }
+        // info!("Rebuilding memtable indexes...");
+        // TODO FIXME build memtable indexes
 
         info!("Database ready.");
 
@@ -329,10 +332,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Lock acquired, appending to log file");
 
         // Write the record to the log
-        // Each serialized row is suffixed with the field separator character sequence
-        let mut serialized_record = record.serialize();
-        serialized_record.extend(SEQ_RECORD_SEP);
-        self.log_file.write_all(&serialized_record)?;
+        self.log_file.write_all(&record.serialize())?;
 
         // Flush and sync to disk
         if self.config.write_durability == WriteDurability::Flush {
@@ -768,9 +768,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .open(temp_path)?;
 
         for entry in map.values() {
-            let mut serialized = entry.serialize();
-            serialized.extend(SEQ_RECORD_SEP);
-            temp_file.write_all(&serialized)?;
+            temp_file.write_all(&entry.serialize())?;
         }
 
         fs::rename(&temp_path, path)?;
@@ -873,5 +871,20 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         fs::rename(&tmp_path, &active_symlink)?;
 
         Ok(())
+    }
+
+    /// Reads the metadata header from the metadata file.
+    /// Leaves the file seek head at the beginning of the records, after the header.
+    fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHeader, io::Error> {
+        let mut version_buf = vec![0u8; 1];
+        metadata_file.seek(SeekFrom::Start(0))?;
+        metadata_file.read_exact(&mut version_buf)?;
+        let version = version_buf[0];
+
+        let mut uuid_buf = vec![0u8; 16];
+        metadata_file.seek_relative(7)?; // skip over padding
+        metadata_file.read_exact(&mut uuid_buf)?;
+        let uuid = Uuid::from_slice(&uuid_buf).expect("Invalid UUID");
+        Ok(MetadataHeader { version, uuid })
     }
 }

@@ -1,81 +1,50 @@
 use super::common::*;
 use std::fs::{self};
-use std::io::{self, BufRead, Read};
+use std::io::{self, Read, Seek};
 
-pub struct ForwardLogReader<'a> {
-    reader: io::BufReader<&'a mut fs::File>,
+pub struct ForwardLogReader {
+    metadata_reader: io::BufReader<fs::File>,
+    data_reader: io::BufReader<fs::File>,
 }
 
-impl<'a> ForwardLogReader<'a> {
-    pub fn new(file: &mut fs::File) -> ForwardLogReader {
-        let reader = io::BufReader::new(file);
-        ForwardLogReader { reader }
+impl<'a> ForwardLogReader {
+    pub fn new(metadata_file: fs::File, data_file: fs::File) -> ForwardLogReader {
+        let mut ret = ForwardLogReader {
+            metadata_reader: io::BufReader::new(metadata_file),
+            data_reader: io::BufReader::new(data_file),
+        };
+
+        ret.metadata_reader
+            .seek(io::SeekFrom::Start(METADATA_FILE_HEADER_SIZE as u64))
+            .expect("Seek failed");
+
+        ret
     }
 
     fn read_record(&mut self) -> Result<Option<Record>, io::Error> {
-        // The buffer that stores the bytes read from the file.
-        let mut read_buf: Vec<u8> = Vec::new();
-        // The buffer that stores all the bytes of the record read so far in reverse order.
-        let mut result_buf: Vec<u8> = Vec::new();
-
-        // Try reading a byte from the file.
-        // If we've reached the end of the file, return None.
-        let mut peek_buf = vec![0];
-        match self.reader.read_exact(&mut peek_buf) {
-            Ok(_) => {
-                // Go back one byte
-                self.reader.seek_relative(-1)?;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+        let mut metadata_entry_buf = vec![0; 16]; // 2x u64
+        if let Err(e) = self.metadata_reader.read_exact(&mut metadata_entry_buf) {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
                 return Ok(None);
-            }
-            Err(e) => {
+            } else {
                 return Err(e);
             }
         }
 
-        loop {
-            read_buf.clear();
-            self.reader.read_until(ESCAPE_CHARACTER, &mut read_buf)?;
-            self.reader.seek_relative(-1)?;
-            result_buf.extend(&read_buf[..read_buf.len() - 1]);
+        // First u64 is the offset of the record in the data file, second is the length of the record
+        let entry_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
+        let entry_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
 
-            // Otherwise, we must have encountered an escape character.
-            match self.read_special_sequence()? {
-                SpecialSequence::RecordSeparator => {
-                    // The record is complete, so we can break out of the loop.
-                    break;
-                }
-                SpecialSequence::LiteralFieldSeparator => {
-                    // The field separator is escaped, so we need to add it to the result buffer.
-                    result_buf.push(FIELD_SEPARATOR);
-                }
-                SpecialSequence::LiteralEscape => {
-                    // The escape character is escaped, so we need to add it to the result buffer.
-                    result_buf.push(ESCAPE_CHARACTER);
-                }
-            }
-        }
+        self.data_reader.seek(io::SeekFrom::Start(entry_offset))?;
+        let mut result_buf = vec![0; entry_length as usize];
+        self.data_reader.read_exact(&mut result_buf)?;
 
         let record = Record::deserialize(&result_buf);
         Ok(Some(record))
     }
-
-    fn read_special_sequence(&mut self) -> Result<SpecialSequence, io::Error> {
-        let mut special_buf: Vec<u8> = vec![0; SEQ_RECORD_SEP.len()];
-        self.reader.read_exact(&mut special_buf)?;
-
-        match validate_special(&special_buf.as_slice()) {
-            Some(special) => Ok(special),
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Not a special sequence",
-            )),
-        }
-    }
 }
 
-impl Iterator for ForwardLogReader<'_> {
+impl Iterator for ForwardLogReader {
     type Item = Record;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -94,28 +63,26 @@ mod tests {
 
     #[test]
     fn test_forward_log_reader_fixture_db1() {
-        let db_path = Path::new(TEST_RESOURCES_DIR).join("test_db1");
-        let mut file = fs::OpenOptions::new()
+        let metadata_path = Path::new(TEST_RESOURCES_DIR).join("test_metadata_1");
+        let data_path = Path::new(TEST_RESOURCES_DIR).join("test_data_1");
+        let metadata_file = fs::OpenOptions::new()
             .read(true)
-            .open(&db_path)
-            .expect("Failed to open file");
-        let mut forward_log_reader = ForwardLogReader::new(&mut file);
+            .open(&metadata_path)
+            .expect("Failed to open metadata file");
+        let data_file = fs::OpenOptions::new()
+            .read(true)
+            .open(&data_path)
+            .expect("Failed to open data file");
 
-        // There are two records in the log with "schema": Int, Null
+        let mut forward_log_reader = ForwardLogReader::new(metadata_file, data_file);
+
+        // There are two records in the log with "schema" with one field: Bytes
 
         let first_record = forward_log_reader
             .next()
             .expect("Failed to read the first record");
         assert!(match first_record.values.as_slice() {
-            [RecordValue::Int(0x1D), RecordValue::Null] => true,
-            _ => false,
-        });
-
-        let last_record = forward_log_reader
-            .next()
-            .expect("Failed to read the last record");
-        assert!(match last_record.values.as_slice() {
-            [RecordValue::Int(10), RecordValue::Null] => true,
+            [RecordValue::Bytes(_)] => true,
             _ => false,
         });
 
