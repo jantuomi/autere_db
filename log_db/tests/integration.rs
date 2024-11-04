@@ -428,11 +428,8 @@ fn test_log_is_rotated_when_capacity_reached() {
     // 3rd segment should not exist (note negation)
     assert!(!data_dir_path.join("metadata").with_extension("3").exists());
 
-    // TODO re-implement rest of the test
-    // when refactor is done
-
     // // Check that the active file only contains five rows
-    // let mut file = OpenOptions::new()
+    // let mut file = fs::OpenOptions::new()
     //     .read(true)
     //     .open(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))
     //     .expect("File could not be opened");

@@ -31,16 +31,9 @@ impl<'a> ForwardLogReader {
             }
         }
 
-        debug!("Read 16 bytes from metadata file: {:?}", metadata_entry_buf);
-
         // First u64 is the offset of the record in the data file, second is the length of the record
         let entry_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
         let entry_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
-
-        debug!(
-            "Read offset {} and length {} from metadata file",
-            entry_offset, entry_length
-        );
 
         // Use .seek_relative instead of .seek to avoid dropping the BufReader internal buffer when
         // the seek distance is small
@@ -48,9 +41,7 @@ impl<'a> ForwardLogReader {
         self.data_reader.seek_relative(seek_distance as i64)?;
 
         let mut result_buf = vec![0; entry_length as usize];
-        debug!("Reading {} bytes from data file", entry_length);
         self.data_reader.read_exact(&mut result_buf)?;
-        debug!("Read {} bytes from data file", result_buf.len());
 
         let record = Record::deserialize(&result_buf);
         Ok(Some(record))

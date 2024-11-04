@@ -122,6 +122,30 @@ pub struct MetadataHeader {
     pub uuid: Uuid,
 }
 
+const METADATA_HEADER_PADDING: &[u8] = &[0; 7];
+impl MetadataHeader {
+    pub fn serialize(&self) -> Vec<u8> {
+        let uuid_bytes = self.uuid.as_bytes().to_vec();
+
+        let mut header = vec![self.version];
+        header.extend(METADATA_HEADER_PADDING);
+        header.extend(uuid_bytes);
+
+        assert_eq!(header.len(), METADATA_FILE_HEADER_SIZE);
+
+        header
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Self {
+        assert_eq!(bytes.len(), METADATA_FILE_HEADER_SIZE);
+
+        let version = bytes[0];
+        let uuid = Uuid::from_slice(&bytes[8..24]).expect("Failed to deserialize Uuid");
+
+        MetadataHeader { version, uuid }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WriteDurability {
     /// Changes are written to an application-level write buffer without flushing to the OS write buffer or syncing to disk.

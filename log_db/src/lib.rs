@@ -14,6 +14,7 @@ pub use log_reader_forward::ForwardLogReader;
 pub use log_reader_reverse::ReverseLogReader;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::Seek;
@@ -248,6 +249,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .open(&active_metadata_path)?;
 
         let active_metadata_header = DB::<Field>::read_metadata_header(&mut active_metadata_file)?;
+
+        if active_metadata_header.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported segment version",
+            ));
+        }
+
         let active_data_path =
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = fs::OpenOptions::new()
@@ -432,6 +441,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.request_shared_lock(&mut metadata_file)?;
 
             let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
+
+            if metadata_header.version != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unsupported segment version",
+                ));
+            }
+
             let data_path = data_dir_path.join(metadata_header.uuid.to_string());
             let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
 
@@ -543,6 +560,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.request_shared_lock(&mut metadata_file)?;
 
             let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
+
+            if metadata_header.version != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unsupported segment version",
+                ));
+            }
+
             let data_path = &data_dir_path.join(metadata_header.uuid.to_string());
             let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
 
@@ -612,6 +637,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
             let metadata_header =
                 DB::<Field>::read_metadata_header(&mut self.active_metadata_file)?;
+
+            if metadata_header.version != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unsupported segment version",
+                ));
+            }
+
             let data_file_path = data_dir_path.join(metadata_header.uuid.to_string());
 
             self.active_metadata_file = metadata_file;
@@ -744,6 +777,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let data_dir = self.config.data_dir.to_owned();
         let data_dir_path = Path::new(&data_dir);
         let active_log_path = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+        let active_target = fs::read_link(&active_log_path)?;
+        let active_metadata_path = data_dir_path.join(active_target);
         let active_log_md = fs::metadata(&active_log_path)?;
 
         if active_log_md.size() >= self.config.segment_size as u64 {
@@ -756,7 +791,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
             // Create a new active log segment
             let (data_file_uuid, _) = DB::<Field>::create_segment_data_file(data_dir_path)?;
-            let (new_segment_num, new_segment_path) =
+            let (new_segment_num, _) =
                 DB::<Field>::create_segment_metadata_file(data_dir_path, &data_file_uuid)?;
             DB::<Field>::set_active_segment(data_dir_path, new_segment_num)?;
 
@@ -766,7 +801,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             // Compact the rotated segment without a lock.
             // Since the rotated segment and the compacted segment based on it will be
             // a) read-only, and b) identical in effective content, there is no need to lock it.
-            self.compact_segment(&new_segment_path)?;
+            self.compact_segment(&active_metadata_path)?;
 
             debug!("Segment compacted");
         }
@@ -774,37 +809,78 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(())
     }
 
-    fn compact_segment(&self, path: &Path) -> Result<(), io::Error> {
-        warn!("TODO compact_segment");
-        // debug!("Opening segment file {:?} for compaction", path);
-        // let mut segment_file = fs::OpenOptions::new().read(true).open(path)?;
+    fn compact_segment(&self, metadata_path: &Path) -> Result<(), io::Error> {
+        let data_dir_path = Path::new(&self.config.data_dir);
 
-        // debug!("Reading segment data into a BTreeMap");
-        // let mut map = BTreeMap::new();
-        // let forward_log_reader = ForwardLogReader::new(&mut segment_file);
-        // for entry in forward_log_reader {
-        //     let primary_key = entry.values[self.primary_key_index]
-        //         .as_indexable()
-        //         .expect("Primary key was not indexable");
-        //     map.insert(primary_key, entry);
-        // }
+        debug!("Opening segment file {:?} for compaction", metadata_path);
+        let mut metadata_file = fs::OpenOptions::new().read(true).open(metadata_path)?;
+        let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
 
-        // debug!("Opening temporary file for writing compacted data");
-        // let temp_file = tempfile::NamedTempFile::new()?;
-        // let temp_path = temp_file.as_ref();
+        if metadata_header.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported segment version",
+            ));
+        }
 
-        // let mut temp_file = fs::OpenOptions::new()
-        //     .create(true)
-        //     .append(true)
-        //     .open(temp_path)?;
+        let data_file_path = data_dir_path.join(metadata_header.uuid.to_string());
+        let data_file = fs::OpenOptions::new().read(true).open(&data_file_path)?;
 
-        // for entry in map.values() {
-        //     temp_file.write_all(&entry.serialize())?;
-        // }
+        debug!("Reading segment data into a BTreeMap");
+        let mut map = BTreeMap::new();
+        let forward_log_reader = ForwardLogReader::new(metadata_file, data_file);
+        for entry in forward_log_reader {
+            let primary_key = entry.values[self.primary_key_index]
+                .as_indexable()
+                .expect("Primary key was not indexable");
+            map.insert(primary_key, entry);
+        }
 
-        // fs::rename(&temp_path, path)?;
+        debug!("Opening temporary files for writing compacted data");
+        let temp_data_file = tempfile::NamedTempFile::new()?;
+        let temp_data_path = temp_data_file.as_ref();
+        let mut temp_data_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(temp_data_path)?;
 
-        // Ok(())
+        let temp_metadata_file = tempfile::NamedTempFile::new()?;
+        let temp_metadata_path = temp_metadata_file.as_ref();
+        let mut temp_metadata_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(temp_metadata_path)?;
+
+        let new_data_uuid = Uuid::new_v4();
+
+        debug!("Writing compacted data to temporary files");
+        let metadata_header = MetadataHeader {
+            version: 1,
+            uuid: new_data_uuid,
+        };
+
+        temp_metadata_file.write_all(&metadata_header.serialize())?;
+
+        let mut offset = 0u64;
+        for entry in map.values() {
+            let serialized = entry.serialize();
+            let len = serialized.len() as u64;
+            temp_data_file.write_all(&serialized)?;
+
+            let mut metadata_buf = vec![];
+            metadata_buf.extend(&offset.to_be_bytes());
+            metadata_buf.extend(&len.to_be_bytes());
+            temp_metadata_file.write_all(&metadata_buf)?;
+
+            offset += len;
+        }
+
+        debug!("Moving temporary files to their final locations");
+        let target_data_file_path = data_dir_path.join(new_data_uuid.to_string());
+        fs::rename(&temp_data_path, &target_data_file_path)?;
+        fs::rename(&temp_metadata_path, metadata_path)?;
+
+        debug!("Compaction complete");
         Ok(())
     }
 
@@ -862,16 +938,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         data_dir_path: &Path,
         data_file_uuid: &Uuid,
     ) -> Result<(u16, PathBuf), io::Error> {
-        let version = 1u8;
-        let padding = vec![0; 7];
-        let uuid_bytes = data_file_uuid.as_bytes().to_vec();
-
-        let mut header = vec![version];
-        header.extend(padding);
-        header.extend(uuid_bytes);
-
-        assert!(header.len() == METADATA_FILE_HEADER_SIZE);
-
         let current_greatest_num = DB::<Field>::greatest_segment_number(data_dir_path)?;
         let new_num = current_greatest_num + 1;
 
@@ -884,7 +950,12 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .append(true)
             .open(&metadata_path)?;
 
-        metadata_file.write_all(&header)?;
+        let metadata_header = MetadataHeader {
+            version: 1,
+            uuid: *data_file_uuid,
+        };
+
+        metadata_file.write_all(&metadata_header.serialize())?;
 
         Ok((new_num, metadata_path))
     }
@@ -908,15 +979,89 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// Reads the metadata header from the metadata file.
     /// Leaves the file seek head at the beginning of the records, after the header.
     fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHeader, io::Error> {
-        let mut version_buf = vec![0u8; 1];
         metadata_file.seek(SeekFrom::Start(0))?;
-        metadata_file.read_exact(&mut version_buf)?;
-        let version = version_buf[0];
+        let mut buf = [0u8; METADATA_FILE_HEADER_SIZE];
+        metadata_file.read_exact(&mut buf)?;
 
-        let mut uuid_buf = vec![0u8; 16];
-        metadata_file.seek_relative(7)?; // skip over padding
-        metadata_file.read_exact(&mut uuid_buf)?;
-        let uuid = Uuid::from_slice(&uuid_buf).expect("Invalid UUID");
-        Ok(MetadataHeader { version, uuid })
+        let header = MetadataHeader::deserialize(&buf);
+        Ok(header)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Eq, PartialEq, Clone, Debug)]
+    enum Field {
+        Id,
+        Name,
+        Data,
+    }
+
+    #[test]
+    fn test_compaction() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let capacity = 5;
+        let segment_size = capacity * 2 * 8 + METADATA_FILE_HEADER_SIZE;
+        let mut db = DB::configure()
+            .data_dir(data_dir.to_str().unwrap())
+            .segment_size(segment_size)
+            .fields(vec![(Field::Id, RecordField::int())])
+            .primary_key(Field::Id)
+            .initialize()
+            .expect("Failed to create DB");
+
+        // Insert records with same value until we reach the capacity
+        for _ in 0..capacity {
+            let record = Record {
+                values: vec![RecordValue::Int(0 as i64)],
+            };
+            db.upsert(&record).expect("Failed to insert record");
+        }
+
+        // Rotate and compact
+        db.do_maintenance_tasks()
+            .expect("Failed to do maintenance tasks");
+
+        // Insert one extra with different value, this goes into another segment
+        let record = Record {
+            values: vec![RecordValue::Int(1 as i64)],
+        };
+        db.upsert(&record).expect("Failed to insert record");
+
+        // Check that rotation resulted in 2 segments
+        assert!(fs::exists(data_dir.join("metadata.1")).unwrap());
+        assert!(fs::exists(data_dir.join("metadata.2")).unwrap());
+        // Note negation here
+        assert!(!fs::exists(data_dir.join("metadata.3")).unwrap());
+
+        // Check that the first segment was compacted
+        let segment1_size = fs::metadata(data_dir.join("metadata.1")).unwrap().len();
+        assert_eq!(segment1_size, 2 * 8 + METADATA_FILE_HEADER_SIZE as u64);
+
+        // Check that the records can be read
+        let rec0 = db
+            .get(&RecordValue::Int(0 as i64))
+            .expect("Failed to get record")
+            .expect("Record not found");
+
+        assert!(match rec0.values[0] {
+            RecordValue::Int(0) => true,
+            _ => false,
+        });
+
+        let rec1 = db
+            .get(&RecordValue::Int(1 as i64))
+            .expect("Failed to get record")
+            .expect("Record not found");
+
+        assert!(match rec1.values[0] {
+            RecordValue::Int(1) => true,
+            _ => false,
+        });
     }
 }
