@@ -1,7 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::fmt::Debug;
 
 pub struct SecondaryMemtable {
     /// Map of records indexed by key. The value is the set of primary key values of records

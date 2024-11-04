@@ -2,8 +2,6 @@ mod utils;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use log_db::*;
-use std::fs::OpenOptions;
-use std::path::Path;
 use tempfile;
 use utils::*;
 
@@ -56,7 +54,7 @@ pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
 
         let sample_record = random_record(0, 1);
-        let record_length = sample_record.serialize().len() + SEQ_RECORD_SEP.len();
+        let record_length = sample_record.serialize().len();
 
         let mut db = DB::configure()
             .data_dir(&data_dir)
@@ -231,58 +229,6 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
     }
 }
 
-fn reverse_read_file_with_various_buffer_sizes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("reverse_read_file_with_various_buffer_sizes");
-    group.sample_size(50);
-
-    // odd powers of 2
-    let buffer_sizes = [128, 512, 2048, 8192, 32768, 131_072, 524_288];
-    const PREFILL_N: usize = 100_000;
-
-    let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-    let data_dir = &data_dir_obj
-        .path()
-        .to_str()
-        .expect("Failed to convert tmpdir path to str");
-
-    // Create a db instance for prefilling
-    let mut db = DB::configure()
-        .data_dir(&data_dir)
-        .fields(vec![
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
-        ])
-        .primary_key(Field::Id)
-        .initialize()
-        .expect("Failed to initialize DB");
-
-    prefill_db(&mut db, PREFILL_N, false).expect("Failed to prefill DB");
-    drop(db);
-
-    for size in buffer_sizes {
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .open(Path::new(data_dir).join("db"))
-                .expect("Failed to open log file");
-
-            b.iter(|| {
-                let mut rev_reader = ReverseLogReader::new_with_size(&mut file, size)
-                    .expect("Failed to create ReverseLogReader");
-
-                // This is to avoid optimizing out the loop
-                let mut i = 0;
-                for _ in &mut rev_reader {
-                    i += 1;
-                }
-
-                i
-            });
-        });
-    }
-}
-
 // Register the benchmark group
 criterion_group!(
     benches,
@@ -292,6 +238,5 @@ criterion_group!(
     get_from_disk_various_initial_sizes,
     get_from_disk_various_initial_sizes_compacted,
     get_various_memtable_capacities,
-    reverse_read_file_with_various_buffer_sizes,
 );
 criterion_main!(benches);

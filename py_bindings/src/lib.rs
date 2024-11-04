@@ -1,7 +1,6 @@
 use log_db;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
 
 type Field = String;
 

@@ -17,6 +17,7 @@ use std::os::windows::fs::MetadataExt;
 pub const ACTIVE_SYMLINK_FILENAME: &str = "active";
 pub const METADATA_FILE_HEADER_SIZE: usize = 24;
 pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
+pub const INIT_LOCK_FILENAME: &str = "init_lock";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const TEST_RESOURCES_DIR: &str = "tests/resources";
 
@@ -216,32 +217,26 @@ impl RecordValue {
             }
             RecordValue::Int(i) => {
                 let mut bytes = vec![1]; // Tag for Int
-                let data_bytes = escape_bytes(&i.to_be_bytes());
-                bytes.extend(&data_bytes);
+                bytes.extend(&i.to_be_bytes());
                 bytes
             }
             RecordValue::Float(f) => {
                 let mut bytes = vec![2]; // Tag for Float
-                let data_bytes = escape_bytes(&f.to_be_bytes());
-                bytes.extend(&data_bytes);
+                bytes.extend(&f.to_be_bytes());
                 bytes
             }
             RecordValue::String(s) => {
                 let mut bytes = vec![3]; // Tag for String
                 let length = s.len() as u64;
-                let length_bytes = escape_bytes(&length.to_be_bytes());
-                bytes.extend(&length_bytes);
-                let data_bytes = escape_bytes(s.as_bytes());
-                bytes.extend(&data_bytes);
+                bytes.extend(&length.to_be_bytes());
+                bytes.extend(s.as_bytes());
                 bytes
             }
             RecordValue::Bytes(b) => {
                 let mut bytes = vec![4]; // Tag for Bytes
                 let length = b.len() as u64;
-                let length_bytes = escape_bytes(&length.to_be_bytes());
-                bytes.extend(&length_bytes);
-                let data_bytes = escape_bytes(b);
-                bytes.extend(&data_bytes);
+                bytes.extend(&length.to_be_bytes());
+                bytes.extend(b);
                 bytes
             }
         }
@@ -317,22 +312,6 @@ impl Record {
         }
         Record { values }
     }
-}
-
-pub fn escape_bytes(buf: &[u8]) -> Vec<u8> {
-    let mut result = Vec::new();
-    for byte in buf {
-        match byte {
-            &FIELD_SEPARATOR => {
-                result.extend(SEQ_LIT_FIELD_SEP);
-            }
-            &ESCAPE_CHARACTER => {
-                result.extend(SEQ_LIT_ESCAPE);
-            }
-            _ => result.push(*byte),
-        }
-    }
-    result
 }
 
 /// A path to a log segment file along with its type

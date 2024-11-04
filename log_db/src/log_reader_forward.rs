@@ -31,13 +31,26 @@ impl<'a> ForwardLogReader {
             }
         }
 
+        debug!("Read 16 bytes from metadata file: {:?}", metadata_entry_buf);
+
         // First u64 is the offset of the record in the data file, second is the length of the record
         let entry_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
         let entry_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
 
-        self.data_reader.seek(io::SeekFrom::Start(entry_offset))?;
+        debug!(
+            "Read offset {} and length {} from metadata file",
+            entry_offset, entry_length
+        );
+
+        // Use .seek_relative instead of .seek to avoid dropping the BufReader internal buffer when
+        // the seek distance is small
+        let seek_distance = entry_offset - self.data_reader.stream_position()?;
+        self.data_reader.seek_relative(seek_distance as i64)?;
+
         let mut result_buf = vec![0; entry_length as usize];
+        debug!("Reading {} bytes from data file", entry_length);
         self.data_reader.read_exact(&mut result_buf)?;
+        debug!("Read {} bytes from data file", result_buf.len());
 
         let record = Record::deserialize(&result_buf);
         Ok(Some(record))
@@ -63,6 +76,7 @@ mod tests {
 
     #[test]
     fn test_forward_log_reader_fixture_db1() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let metadata_path = Path::new(TEST_RESOURCES_DIR).join("test_metadata_1");
         let data_path = Path::new(TEST_RESOURCES_DIR).join("test_data_1");
         let metadata_file = fs::OpenOptions::new()
@@ -82,7 +96,7 @@ mod tests {
             .next()
             .expect("Failed to read the first record");
         assert!(match first_record.values.as_slice() {
-            [RecordValue::Bytes(_)] => true,
+            [RecordValue::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });
 

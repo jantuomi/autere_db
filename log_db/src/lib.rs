@@ -14,7 +14,6 @@ pub use log_reader_forward::ForwardLogReader;
 pub use log_reader_reverse::ReverseLogReader;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::Seek;
@@ -23,9 +22,6 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
-use tempfile;
-use tempfile::tempfile_in;
-use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
@@ -162,25 +158,42 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // After creation, the directory should always be in a complete state
         // without missing files.
         // A tempdir-move strategy is used to achieve one-phase commit.
-        if !fs::exists(&config.data_dir)?
-            || !fs::exists(&Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME))?
-        {
-            let tmpdir = tempfile::tempdir()?;
-            let tmpdir_path = tmpdir.into_path();
 
-            let (segment_uuid, _) = DB::<Field>::create_segment_data_file(&tmpdir_path)?;
+        // Ensure the data directory exists
+        let data_dir_path = Path::new(&config.data_dir);
+        match fs::create_dir(&data_dir_path) {
+            Ok(_) => {}
+            Err(e) => {
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+        }
+
+        // Create an initialize lock file to prevent multiple concurrent initializations
+        let init_lock_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&data_dir_path.join(INIT_LOCK_FILENAME))?;
+
+        init_lock_file.lock_exclusive()?;
+
+        // We have acquired the lock, check if the data directory is in a complete state
+        // If not, initialize it, otherwise skip.
+        if !fs::exists(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))? {
+            let (segment_uuid, _) = DB::<Field>::create_segment_data_file(data_dir_path)?;
             let (segment_num, _) =
-                DB::<Field>::create_segment_metadata_file(&tmpdir_path, &segment_uuid)?;
-            DB::<Field>::set_active_segment(&tmpdir_path, segment_num)?;
+                DB::<Field>::create_segment_metadata_file(data_dir_path, &segment_uuid)?;
+            DB::<Field>::set_active_segment(data_dir_path, segment_num)?;
 
             // Create the exclusive lock request file
             fs::OpenOptions::new()
                 .create(true)
                 .write(true)
-                .open(&tmpdir_path.join(EXCL_LOCK_REQUEST_FILENAME))?;
-
-            fs::rename(tmpdir_path, &config.data_dir)?;
+                .open(data_dir_path.join(EXCL_LOCK_REQUEST_FILENAME))?;
         }
+
+        init_lock_file.unlock()?;
 
         // Calculate the index of the primary value in a record
         let primary_key_index = config
@@ -238,7 +251,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let active_data_path =
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = fs::OpenOptions::new()
-            .read(true)
             .append(true)
             .open(&active_data_path)?;
 
@@ -322,9 +334,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Opening file in append mode and acquiring exclusive lock...");
 
         // Acquire an exclusive lock for writing
-        self.request_exclusive_lock()?;
+        self.request_exclusive_lock_on_active()?;
 
-        if self.ensure_correct_file_is_open()? {
+        if self.ensure_active_file_is_open()? {
             // The log file has been rotated, so we must try again
             return self.upsert(record);
         }
@@ -332,18 +344,37 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Lock acquired, appending to log file");
 
         // Write the record to the log
-        self.log_file.write_all(&record.serialize())?;
+        let serialized = &record.serialize();
+        let record_offset = self.active_data_file.metadata()?.len();
+        let record_length = serialized.len() as u64;
+        self.active_data_file.write_all(serialized)?;
 
-        // Flush and sync to disk
+        // Flush and sync data to disk
         if self.config.write_durability == WriteDurability::Flush {
-            self.log_file.flush()?;
+            self.active_data_file.flush()?;
         }
         if self.config.write_durability == WriteDurability::FlushSync {
-            self.log_file.flush()?;
-            self.log_file.sync_all()?;
+            self.active_data_file.flush()?;
+            self.active_data_file.sync_all()?;
         }
 
-        self.log_file.unlock()?;
+        // Write the record metadata to the metadata file
+        let mut metadata_buf = vec![];
+        metadata_buf.extend(&record_offset.to_be_bytes());
+        metadata_buf.extend(&record_length.to_be_bytes());
+        self.active_metadata_file.write_all(&metadata_buf)?;
+
+        // Flush and sync metadata to disk
+        if self.config.write_durability == WriteDurability::Flush {
+            self.active_metadata_file.flush()?;
+        }
+        if self.config.write_durability == WriteDurability::FlushSync {
+            self.active_metadata_file.flush()?;
+            self.active_metadata_file.sync_all()?;
+        }
+
+        self.active_data_file.unlock()?;
+        self.active_metadata_file.unlock()?;
 
         debug!("Record appended to log file, lock released");
 
@@ -382,65 +413,48 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             "Matching records based on value at primary key index ({})",
             &self.primary_key_index
         );
-        debug!("Opening file in read mode and acquiring shared lock...");
 
-        // Open the file and acquire a shared lock for reading
-        let mut file = fs::OpenOptions::new().read(true).open(&self.log_path)?;
+        let data_dir_path = Path::new(&self.config.data_dir);
+        let greatest = DB::<Field>::greatest_segment_number(&data_dir_path)?;
+        debug!("Searching segments {} through 1", greatest);
 
-        self.request_shared_lock(&mut file)?;
+        let mut found_record: Option<Record> = None;
+        for segment_num in (1..=greatest).rev() {
+            let segment_path = data_dir_path.join(format!("metadata.{}", segment_num));
 
-        if !is_file_same_as_path(&file, &self.log_path)? {
-            // The log file has been rotated, so we must try again
-            debug!("Lock acquired, but the log file has been rotated. Retrying get...");
-            file.unlock()?;
-            drop(file);
-            return self.get(query_key_original);
-        }
+            debug!(
+                "Opening segment {} in read mode and acquiring shared lock...",
+                segment_num
+            );
 
-        debug!("Lock acquired, searching log files for record");
+            let mut metadata_file = fs::OpenOptions::new().read(true).open(&segment_path)?;
 
-        let greatest = DB::<Field>::greatest_segment_number(&Path::new(&self.config.data_dir))?;
-        let segment_numbers = (0..=greatest); // FIXME all of this needs fixing
-        let mut result: Option<Record> = None;
-        for n in segment_numbers {
-            if n == 0 {
-                debug!("Searching the active log file...");
-                result = ReverseLogReader::new(&mut file)?.find(|record| {
-                    let record_key = record.values[self.primary_key_index]
-                        .as_indexable()
-                        .expect("A non-indexable value was stored at key index");
-                    record_key == query_key
-                });
+            self.request_shared_lock(&mut metadata_file)?;
 
-                debug!("Active log file searched, releasing shared lock...");
-                file.unlock()?;
-            } else {
-                debug!("Locking and searching rotated log segment file {}...", n);
-                let path = Path::new(&self.config.data_dir)
-                    .join(ACTIVE_SYMLINK_FILENAME)
-                    .with_extension(n.to_string());
+            let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
+            let data_path = data_dir_path.join(metadata_header.uuid.to_string());
+            let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
 
-                let mut segm_file = fs::OpenOptions::new().read(true).open(&path)?;
-                self.request_shared_lock(&mut segm_file)?;
-                result = ReverseLogReader::new(&mut segm_file)?.find(|record| {
-                    let record_key = record.values[self.primary_key_index]
-                        .as_indexable()
-                        .expect("A non-indexable value was stored at key index");
-                    record_key == query_key
-                });
+            // We should not "request_shared_lock()" here because we do not want
+            // to give way to writers at this point. That would possibly lead to a deadlock.
+            data_file.lock_shared()?;
 
-                debug!("Segment file searched, releasing shared lock...");
-                segm_file.unlock()?;
-            };
+            let mut reader = ReverseLogReader::new(metadata_file, data_file)?;
 
-            if result.is_some() {
+            if let Some(found) = reader.find(|record| {
+                let record_key = record.values[self.primary_key_index]
+                    .as_indexable()
+                    .expect("Primary key must be indexable");
+                record_key == query_key
+            }) {
+                found_record = Some(found);
                 break;
             }
         }
 
         debug!("Record search complete");
 
-        let result_value = match &result {
+        let result_value = match &found_record {
             Some(record) => record,
             None => {
                 debug!("No record found for key {:?}", query_key);
@@ -453,7 +467,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Updating memtables");
         self.insert_to_memtables(&result_value);
 
-        Ok(result)
+        Ok(found_record)
     }
 
     /// Get a collection of records based on a field value.
@@ -512,39 +526,52 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 "Key not found in schema after initialize",
             ))?;
 
-        debug!("Matching key index {}", key_index);
-        debug!("Acquiring shared lock...");
+        let data_dir_path = Path::new(&self.config.data_dir);
+        let greatest = DB::<Field>::greatest_segment_number(&data_dir_path)?;
 
-        // Acquire a shared lock for reading
-        self.log_file.lock_shared()?;
+        let mut found_records = vec![];
+        for segment_num in (1..=greatest).rev() {
+            let segment_path = data_dir_path.join(format!("metadata.{}", segment_num));
 
-        if self.ensure_correct_file_is_open()? {
-            // The log file has been rotated, so we must try again
-            return self.find_all(field, query_key_original);
-        }
+            debug!(
+                "Opening segment {} in read mode and acquiring shared lock...",
+                segment_num
+            );
 
-        debug!("Lock acquired, searching log file for record");
+            let mut metadata_file = fs::OpenOptions::new().read(true).open(&segment_path)?;
 
-        let result = ReverseLogReader::new(&mut self.log_file)?
-            .filter(|record| {
+            self.request_shared_lock(&mut metadata_file)?;
+
+            let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
+            let data_path = &data_dir_path.join(metadata_header.uuid.to_string());
+            let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
+
+            // We should not "request_shared_lock()" here because we do not want
+            // to give way to writers at this point. That would possibly lead to a deadlock.
+            data_file.lock_shared()?;
+
+            let reader = ReverseLogReader::new(metadata_file, data_file)?;
+
+            for record in reader {
                 let record_key = record.values[key_index]
                     .as_indexable()
-                    .expect("A non-indexable value was stored at key index");
-                record_key == query_key
-            })
-            .collect::<Vec<Record>>();
+                    .expect("Secondary key must be indexable");
+                if record_key == query_key {
+                    found_records.push(record);
+                }
+            }
+        }
 
-        self.log_file.unlock()?;
-        debug!("Record search complete, lock released");
+        debug!("Record search complete");
 
         debug!(
             "Number of matching records found in log file: {}",
-            result.len()
+            found_records.len()
         );
 
         if let Some(memtable_index) = found_memtable_index {
             debug!("Inserting result set into secondary index");
-            let primary_values: Vec<IndexableValue> = result
+            let primary_values: Vec<IndexableValue> = found_records
                 .iter()
                 .map(|r| {
                     r.values[self.primary_key_index]
@@ -555,7 +582,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.secondary_memtables[memtable_index].set_all(&query_key, &primary_values);
         }
 
-        Ok(result)
+        Ok(found_records)
     }
 
     fn get_secondary_memtable_index_by_field(&self, field: &Field) -> Option<usize> {
@@ -565,26 +592,34 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             .position(|schema_field| schema_field == field)
     }
 
-    /// Ensures that the `self.log_file` handle is still pointing to the correct file.
-    /// If the file has been rotated, the handle will be closed and reopened.
+    /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
+    /// If the segment has been rotated, the handle will be closed and reopened.
     /// Returns `true` if the file has been rotated and the handle has been reopened.
-    fn ensure_correct_file_is_open(&mut self) -> Result<bool, io::Error> {
-        if !is_file_same_as_path(&self.log_file, &self.log_path)? {
-            // The log file has been rotated, so we must try again
-            debug!(
-                "Lock acquired, but the log file has been rotated. Reopening file and retrying..."
-            );
-            self.log_file.unlock()?;
+    fn ensure_active_file_is_open(&mut self) -> Result<bool, io::Error> {
+        let data_dir_path = Path::new(&self.config.data_dir);
+        let active_target = fs::read_link(data_dir_path.join("active"))?;
+        let active_metadata_path = data_dir_path.join(active_target);
 
-            self.log_file = fs::OpenOptions::new()
-                .create(true)
+        let correct = is_file_same_as_path(&self.active_metadata_file, &active_metadata_path)?;
+        if !correct {
+            debug!("Metadata file has been rotated. Reopening...");
+            let mut metadata_file = fs::OpenOptions::new()
                 .read(true)
-                .append(true)
-                .open(&self.log_path)?;
+                .write(true)
+                .open(&active_metadata_path)?;
 
-            Ok(true)
+            self.request_shared_lock(&mut metadata_file)?;
+
+            let metadata_header =
+                DB::<Field>::read_metadata_header(&mut self.active_metadata_file)?;
+            let data_file_path = data_dir_path.join(metadata_header.uuid.to_string());
+
+            self.active_metadata_file = metadata_file;
+            self.active_data_file = fs::OpenOptions::new().append(true).open(&data_file_path)?;
+
+            return Ok(true);
         } else {
-            Ok(false)
+            return Ok(false);
         }
     }
 
@@ -619,7 +654,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
     }
 
-    fn request_exclusive_lock(&mut self) -> Result<(), io::Error> {
+    fn request_exclusive_lock_on_active(&mut self) -> Result<(), io::Error> {
         // Create a lock on the exclusive lock request file to signal to readers that they should wait
         let lock_request_path = Path::new(&self.config.data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
         let lock_request_file = fs::OpenOptions::new()
@@ -641,8 +676,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         //     ));
         // }
 
-        // Acquire an exclusive lock on the log file
-        self.log_file.lock_exclusive()?;
+        // Acquire an exclusive lock on the segment files
+        self.active_metadata_file.lock_exclusive()?;
+        self.active_data_file.lock_exclusive()?;
 
         // Unlock the request file
         lock_request_file.unlock()?;
@@ -705,38 +741,32 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// You may call this function in a separate thread or process to avoid blocking the main thread.
     /// However, the database will be exclusively locked, so all writes will be blocked during the tasks.
     pub fn do_maintenance_tasks(&mut self) -> Result<(), io::Error> {
-        let active_log_path = Path::new(&self.config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
+        let data_dir = self.config.data_dir.to_owned();
+        let data_dir_path = Path::new(&data_dir);
+        let active_log_path = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
         let active_log_md = fs::metadata(&active_log_path)?;
 
         if active_log_md.size() >= self.config.segment_size as u64 {
             // Rotate the active log file
 
             debug!("Starting rotation, requesting exclusive lock...");
-            self.request_exclusive_lock()?;
+            self.request_exclusive_lock_on_active()?;
 
             debug!("Exclusive lock acquired, rotating active log file...");
-            let next_segment_number =
-                DB::<Field>::greatest_segment_number(&Path::new(&self.config.data_dir))? + 1;
-            let next_segment_path =
-                &active_log_path.with_extension(next_segment_number.to_string());
 
-            debug!("Renaming active log file to {:?}", &next_segment_path);
-            fs::rename(&active_log_path, &next_segment_path)?;
-
-            // Create a new active log file
-            self.log_file = fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open(&active_log_path)?;
+            // Create a new active log segment
+            let (data_file_uuid, _) = DB::<Field>::create_segment_data_file(data_dir_path)?;
+            let (new_segment_num, new_segment_path) =
+                DB::<Field>::create_segment_metadata_file(data_dir_path, &data_file_uuid)?;
+            DB::<Field>::set_active_segment(data_dir_path, new_segment_num)?;
 
             // The new active log file is not locked by this client so it cannot be touched.
-            debug!("Active log file rotated");
+            debug!("Active log file rotated, new segment: {}", new_segment_num);
 
             // Compact the rotated segment without a lock.
             // Since the rotated segment and the compacted segment based on it will be
             // a) read-only, and b) identical in effective content, there is no need to lock it.
-            self.compact_segment(&next_segment_path)?;
+            self.compact_segment(&new_segment_path)?;
 
             debug!("Segment compacted");
         }
@@ -745,34 +775,36 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     }
 
     fn compact_segment(&self, path: &Path) -> Result<(), io::Error> {
-        debug!("Opening segment file {:?} for compaction", path);
-        let mut segment_file = fs::OpenOptions::new().read(true).open(path)?;
+        warn!("TODO compact_segment");
+        // debug!("Opening segment file {:?} for compaction", path);
+        // let mut segment_file = fs::OpenOptions::new().read(true).open(path)?;
 
-        debug!("Reading segment data into a BTreeMap");
-        let mut map = BTreeMap::new();
-        let forward_log_reader = ForwardLogReader::new(&mut segment_file);
-        for entry in forward_log_reader {
-            let primary_key = entry.values[self.primary_key_index]
-                .as_indexable()
-                .expect("Primary key was not indexable");
-            map.insert(primary_key, entry);
-        }
+        // debug!("Reading segment data into a BTreeMap");
+        // let mut map = BTreeMap::new();
+        // let forward_log_reader = ForwardLogReader::new(&mut segment_file);
+        // for entry in forward_log_reader {
+        //     let primary_key = entry.values[self.primary_key_index]
+        //         .as_indexable()
+        //         .expect("Primary key was not indexable");
+        //     map.insert(primary_key, entry);
+        // }
 
-        debug!("Opening temporary file for writing compacted data");
-        let temp_file = tempfile::NamedTempFile::new()?;
-        let temp_path = temp_file.as_ref();
+        // debug!("Opening temporary file for writing compacted data");
+        // let temp_file = tempfile::NamedTempFile::new()?;
+        // let temp_path = temp_file.as_ref();
 
-        let mut temp_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(temp_path)?;
+        // let mut temp_file = fs::OpenOptions::new()
+        //     .create(true)
+        //     .append(true)
+        //     .open(temp_path)?;
 
-        for entry in map.values() {
-            temp_file.write_all(&entry.serialize())?;
-        }
+        // for entry in map.values() {
+        //     temp_file.write_all(&entry.serialize())?;
+        // }
 
-        fs::rename(&temp_path, path)?;
+        // fs::rename(&temp_path, path)?;
 
+        // Ok(())
         Ok(())
     }
 
