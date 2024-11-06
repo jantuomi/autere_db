@@ -147,6 +147,12 @@ pub struct DB<Field: Eq + Clone + Debug> {
     secondary_memtables: Vec<SecondaryMemtable>,
 }
 
+enum IsActiveMetadataValidResult {
+    Ok,
+    ReplaceFile,
+    TruncateToSize(u64),
+}
+
 impl<Field: Eq + Clone + Debug> DB<Field> {
     /// Create a new database configuration builder.
     pub fn configure() -> ConfigBuilder<Field> {
@@ -345,12 +351,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // Acquire an exclusive lock for writing
         self.request_exclusive_lock_on_active()?;
 
-        if self.ensure_active_file_is_open()? {
+        if !self.ensure_active_file_is_open()? || !self.ensure_active_metadata_is_valid()? {
             // The log file has been rotated, so we must try again
+            self.active_metadata_file.unlock()?;
+            self.active_data_file.unlock()?;
             return self.upsert(record);
         }
 
-        debug!("Lock acquired, appending to log file");
+        debug!("Exclusive lock acquired, appending to log file");
 
         // Write the record to the log
         let serialized = &record.serialize();
@@ -371,6 +379,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let mut metadata_buf = vec![];
         metadata_buf.extend(&record_offset.to_be_bytes());
         metadata_buf.extend(&record_length.to_be_bytes());
+
+        assert_eq!(metadata_buf.len(), 16);
         self.active_metadata_file.write_all(&metadata_buf)?;
 
         // Flush and sync metadata to disk
@@ -390,6 +400,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Updating memtables");
         self.insert_to_memtables(record);
 
+        let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
+        assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
+        assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
+
         Ok(())
     }
 
@@ -405,6 +419,19 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             io::ErrorKind::InvalidInput,
             "Queried value must be indexable",
         ))?;
+
+        match self.is_active_metadata_valid()? {
+            IsActiveMetadataValidResult::Ok => {}
+            _ => {
+                debug!("Active metadata file is invalid, acquiring exclusive lock to start autorepair...");
+                self.request_exclusive_lock_on_active()?;
+
+                self.ensure_active_metadata_is_valid()?;
+
+                self.active_metadata_file.unlock()?;
+                self.active_data_file.unlock()?;
+            }
+        };
 
         debug!("Looking up key {:?} in primary memtable", query_key);
         let found = self.primary_memtable.get(&query_key);
@@ -513,6 +540,19 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             "Queried value must be indexable",
         ))?;
 
+        match self.is_active_metadata_valid()? {
+            IsActiveMetadataValidResult::Ok => {}
+            _ => {
+                debug!("Active metadata file is invalid, acquiring exclusive lock to start autorepair...");
+                self.request_exclusive_lock_on_active()?;
+
+                self.ensure_active_metadata_is_valid()?;
+
+                self.active_metadata_file.unlock()?;
+                self.active_data_file.unlock()?;
+            }
+        };
+
         // Try to find a memtable with the queried key
         let found_memtable_index = self.get_secondary_memtable_index_by_field(field);
 
@@ -619,7 +659,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
     /// If the segment has been rotated, the handle will be closed and reopened.
-    /// Returns `true` if the file has been rotated and the handle has been reopened.
+    /// Returns `false` if the file has been rotated and the handle has been reopened, `true` otherwise.
     fn ensure_active_file_is_open(&mut self) -> Result<bool, io::Error> {
         let data_dir_path = Path::new(&self.config.data_dir);
         let active_target = fs::read_link(data_dir_path.join("active"))?;
@@ -650,9 +690,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.active_metadata_file = metadata_file;
             self.active_data_file = fs::OpenOptions::new().append(true).open(&data_file_path)?;
 
-            return Ok(true);
-        } else {
             return Ok(false);
+        } else {
+            return Ok(true);
         }
     }
 
@@ -781,11 +821,26 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let active_metadata_path = data_dir_path.join(active_target);
         let active_log_md = fs::metadata(&active_log_path)?;
 
+        let mut already_locked = false;
+        match self.is_active_metadata_valid()? {
+            IsActiveMetadataValidResult::Ok => {}
+            _ => {
+                debug!("Active metadata is invalid, acquiring exclusive lock...");
+                self.request_exclusive_lock_on_active()?;
+                already_locked = true;
+
+                self.ensure_active_metadata_is_valid()?;
+            }
+        };
+
         if active_log_md.size() >= self.config.segment_size as u64 {
             // Rotate the active log file
 
-            debug!("Starting rotation, requesting exclusive lock...");
-            self.request_exclusive_lock_on_active()?;
+            debug!("Starting rotation");
+            if !already_locked {
+                debug!("Requesting exclusive lock on active log file...");
+                self.request_exclusive_lock_on_active()?;
+            }
 
             debug!("Exclusive lock acquired, rotating active log file...");
 
@@ -805,6 +860,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
             debug!("Segment compacted");
         }
+
+        self.active_metadata_file.unlock()?;
+        self.active_data_file.unlock()?;
 
         Ok(())
     }
@@ -875,12 +933,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             offset += len;
         }
 
+        let final_len = temp_metadata_file.seek(io::SeekFrom::End(0))?;
+
         debug!("Moving temporary files to their final locations");
         let target_data_file_path = data_dir_path.join(new_data_uuid.to_string());
         fs::rename(&temp_data_path, &target_data_file_path)?;
         fs::rename(&temp_metadata_path, metadata_path)?;
 
-        debug!("Compaction complete");
+        debug!("Compaction complete, resulting size: {}", final_len);
         Ok(())
     }
 
@@ -957,6 +1017,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         metadata_file.write_all(&metadata_header.serialize())?;
 
+        let len = metadata_file.seek(io::SeekFrom::End(0))?;
+        assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
+        assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
+
         Ok((new_num, metadata_path))
     }
 
@@ -986,6 +1050,88 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let header = MetadataHeader::deserialize(&buf);
         Ok(header)
     }
+
+    fn is_active_metadata_valid(&mut self) -> Result<IsActiveMetadataValidResult, io::Error> {
+        let size = self.active_metadata_file.seek(SeekFrom::End(0))? as usize;
+
+        if size < METADATA_FILE_HEADER_SIZE {
+            return Ok(IsActiveMetadataValidResult::ReplaceFile);
+        }
+
+        // The data section must be a multiple of 16 bytes.
+        // Otherwise, the non-aligned part of the file is dropped.
+        let data_section_len = size - METADATA_FILE_HEADER_SIZE;
+        let remainder = data_section_len % 16;
+        if remainder != 0 {
+            return Ok(IsActiveMetadataValidResult::TruncateToSize(
+                (size - remainder) as u64,
+            ));
+        }
+
+        Ok(IsActiveMetadataValidResult::Ok)
+    }
+
+    /// Check that the active metadata file is well-formed and repair it if necessary.
+    /// The metadata file is considered well-formed if its size is, in pseudocode, `header_size + n * record_size`.
+    /// If the file is not well-formed, it is truncated to the last well-formed record using
+    /// a temporary file and an atomic move operation.
+    ///
+    /// `self.active_metadata_file` must be a locked file handle opened with read permissions.
+    /// The function leaves the seek head in an unspecified position.
+    ///
+    /// Returns `false` if the file was repaired and rotated, `true` if no action was taken.
+    fn ensure_active_metadata_is_valid(&mut self) -> Result<bool, io::Error> {
+        let current_len = self.active_metadata_file.seek(SeekFrom::End(0))? as usize;
+
+        match self.is_active_metadata_valid()? {
+            IsActiveMetadataValidResult::Ok => return Ok(true),
+            IsActiveMetadataValidResult::ReplaceFile => {
+                let data_dir_path = Path::new(&self.config.data_dir);
+                let active_target = fs::read_link(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))?;
+                let active_path = data_dir_path.join(&active_target);
+                warn!(
+                    "Metadata file \"{}\" is malformed ({} bytes), replacing it with an empty file",
+                    active_target.display(),
+                    current_len,
+                );
+                let mut tmp_file = tempfile::NamedTempFile::new()?;
+
+                let header = MetadataHeader {
+                    version: 1,
+                    uuid: Uuid::new_v4(),
+                };
+
+                tmp_file.write_all(&header.serialize())?;
+                fs::rename(tmp_file.path(), active_path)?;
+
+                debug!("Replaced metadata file");
+                return Ok(false);
+            }
+            IsActiveMetadataValidResult::TruncateToSize(new_size) => {
+                let data_dir_path = Path::new(&self.config.data_dir);
+                let active_target = fs::read_link(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))?;
+                let active_path = data_dir_path.join(&active_target);
+                warn!(
+                    "Metadata file \"{}\" is malformed ({} bytes), truncating it to {} bytes",
+                    active_target.display(),
+                    current_len,
+                    new_size
+                );
+
+                let mut tmp_file = tempfile::NamedTempFile::new()?;
+
+                let mut buf = vec![0; new_size as usize];
+                self.active_metadata_file.seek(SeekFrom::Start(0))?;
+                self.active_metadata_file.read_exact(&mut buf)?;
+
+                tmp_file.write_all(&buf)?;
+                fs::rename(tmp_file.path(), active_path)?;
+
+                debug!("Truncated metadata file");
+                return Ok(false);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -995,8 +1141,6 @@ mod tests {
     #[derive(Eq, PartialEq, Clone, Debug)]
     enum Field {
         Id,
-        Name,
-        Data,
     }
 
     #[test]
@@ -1063,5 +1207,54 @@ mod tests {
             RecordValue::Int(1) => true,
             _ => false,
         });
+    }
+
+    #[test]
+    fn test_repair() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let mut db = DB::configure()
+            .data_dir(data_dir.to_str().unwrap())
+            .memtable_capacity(0)
+            .fields(vec![(Field::Id, RecordField::int())])
+            .primary_key(Field::Id)
+            .initialize()
+            .expect("Failed to create DB");
+
+        // Insert records
+        let n_recs = 100;
+        for i in 0..n_recs {
+            let record = Record {
+                values: vec![RecordValue::Int(i as i64)],
+            };
+            db.upsert(&record).expect("Failed to insert record");
+        }
+
+        // Open the segment file and write garbage to it to simulate corruption
+        let segment_metadata_path = data_dir.join("metadata.1");
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&segment_metadata_path)
+            .expect("Failed to open file");
+
+        file.write_all(&[0, 1, 2, 3])
+            .expect("Failed to write garbage");
+
+        let len = file.seek(SeekFrom::End(0)).expect("Failed to seek");
+        assert_ne!(len, METADATA_FILE_HEADER_SIZE as u64 + n_recs * 16);
+
+        // Try to read from the file, triggering autorepair
+        db.get(&RecordValue::Int(0)).expect("Failed to get record");
+
+        // Reopen file and check that it has the correct size
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .open(&segment_metadata_path)
+            .expect("Failed to open file");
+        let len = file.seek(SeekFrom::End(0)).expect("Failed to seek");
+        assert_eq!(len, METADATA_FILE_HEADER_SIZE as u64 + n_recs * 16);
     }
 }

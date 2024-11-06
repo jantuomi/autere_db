@@ -50,11 +50,6 @@ impl ReverseLogReader {
         let entry_offset = u64::from_be_bytes(self.metadata_buf[i..i + 8].try_into().unwrap());
         let entry_length = u64::from_be_bytes(self.metadata_buf[i + 8..i + 16].try_into().unwrap());
 
-        debug!(
-            "Read offset {} and length {} from metadata file at position {}",
-            entry_offset, entry_length, i
-        );
-
         self.data_reader.seek(io::SeekFrom::Start(entry_offset))?;
         let mut result_buf = vec![0; entry_length as usize];
         self.data_reader.read_exact(&mut result_buf)?;

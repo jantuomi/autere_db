@@ -427,32 +427,4 @@ fn test_log_is_rotated_when_capacity_reached() {
 
     // 3rd segment should not exist (note negation)
     assert!(!data_dir_path.join("metadata").with_extension("3").exists());
-
-    // // Check that the active file only contains five rows
-    // let mut file = fs::OpenOptions::new()
-    //     .read(true)
-    //     .open(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))
-    //     .expect("File could not be opened");
-
-    // let records_in_active_log = ForwardLogReader::new(&mut file).count();
-    // assert_eq!(records_in_active_log, 5);
-
-    // // Check that each rotated file contains only 1 record
-    // // because of compaction
-    // for i in &[1, 2] {
-    //     let mut file = OpenOptions::new()
-    //         .read(true)
-    //         .open(
-    //             Path::new(&data_dir)
-    //                 .join(ACTIVE_SYMLINK_FILENAME)
-    //                 .with_extension(i.to_string()),
-    //         )
-    //         .expect("File could not be opened");
-    //     let records_in_rotated_log = ForwardLogReader::new(&mut file).count();
-    //     assert_eq!(records_in_rotated_log, 1);
-    // }
-
-    // // Look for nonexistant record to scan all segment files
-    // let found = db.get(&RecordValue::Int(2)).expect("Failed to get record");
-    // assert!(found.is_none());
 }
