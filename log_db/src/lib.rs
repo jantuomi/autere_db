@@ -140,6 +140,7 @@ struct Config<Field: Eq + Clone> {
 
 pub struct DB<Field: Eq + Clone + Debug> {
     config: Config<Field>,
+    data_dir: PathBuf,
     active_metadata_file: fs::File,
     active_data_file: fs::File,
     primary_key_index: usize,
@@ -272,6 +273,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         let db = DB::<Field> {
             config: config.clone(),
+            data_dir: data_dir_path.to_path_buf(),
             active_metadata_file,
             active_data_file,
             primary_key_index,
@@ -450,13 +452,12 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             &self.primary_key_index
         );
 
-        let data_dir_path = Path::new(&self.config.data_dir);
-        let greatest = DB::<Field>::greatest_segment_number(&data_dir_path)?;
+        let greatest = DB::<Field>::greatest_segment_number(&self.data_dir)?;
         debug!("Searching segments {} through 1", greatest);
 
         let mut found_record: Option<Record> = None;
         for segment_num in (1..=greatest).rev() {
-            let segment_path = data_dir_path.join(format!("metadata.{}", segment_num));
+            let segment_path = &self.data_dir.join(format!("metadata.{}", segment_num));
 
             debug!(
                 "Opening segment {} in read mode and acquiring shared lock...",
@@ -476,7 +477,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 ));
             }
 
-            let data_path = data_dir_path.join(metadata_header.uuid.to_string());
+            let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
             let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
 
             // We should not "request_shared_lock()" here because we do not want
@@ -571,12 +572,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 "Key not found in schema after initialize",
             ))?;
 
-        let data_dir_path = Path::new(&self.config.data_dir);
-        let greatest = DB::<Field>::greatest_segment_number(&data_dir_path)?;
+        let greatest = DB::<Field>::greatest_segment_number(&self.data_dir)?;
 
         let mut found_records = vec![];
         for segment_num in (1..=greatest).rev() {
-            let segment_path = data_dir_path.join(format!("metadata.{}", segment_num));
+            let segment_path = &self.data_dir.join(format!("metadata.{}", segment_num));
 
             debug!(
                 "Opening segment {} in read mode and acquiring shared lock...",
@@ -596,7 +596,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 ));
             }
 
-            let data_path = &data_dir_path.join(metadata_header.uuid.to_string());
+            let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
             let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
 
             // We should not "request_shared_lock()" here because we do not want
@@ -649,9 +649,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// If the segment has been rotated, the handle will be closed and reopened.
     /// Returns `false` if the file has been rotated and the handle has been reopened, `true` otherwise.
     fn ensure_active_file_is_open(&mut self) -> Result<bool, io::Error> {
-        let data_dir_path = Path::new(&self.config.data_dir);
-        let active_target = fs::read_link(data_dir_path.join("active"))?;
-        let active_metadata_path = data_dir_path.join(active_target);
+        let active_target = fs::read_link(&self.data_dir.join("active"))?;
+        let active_metadata_path = &self.data_dir.join(active_target);
 
         let correct = is_file_same_as_path(&self.active_metadata_file, &active_metadata_path)?;
         if !correct {
@@ -673,7 +672,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 ));
             }
 
-            let data_file_path = data_dir_path.join(metadata_header.uuid.to_string());
+            let data_file_path = &self.data_dir.join(metadata_header.uuid.to_string());
 
             self.active_metadata_file = metadata_file;
             self.active_data_file = fs::OpenOptions::new().append(true).open(&data_file_path)?;
@@ -686,7 +685,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     fn request_exclusive_lock_on_active(&mut self) -> Result<(), io::Error> {
         // Create a lock on the exclusive lock request file to signal to readers that they should wait
-        let lock_request_path = Path::new(&self.config.data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
+        let lock_request_path = &self.data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
         let lock_request_file = fs::OpenOptions::new()
             .create(true)
             .write(true) // When requesting a lock, we need to have either read or write permissions
@@ -716,8 +715,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(())
     }
 
-    fn is_exclusive_lock_requested(&self, data_dir: &str) -> Result<bool, io::Error> {
-        let lock_request_path = Path::new(data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
+    fn is_exclusive_lock_requested(&self) -> Result<bool, io::Error> {
+        let lock_request_path = &self.data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
         let lock_request_file = fs::OpenOptions::new()
             .create(true)
             .write(true) // When requesting a lock, we need to have either read or write permissions
@@ -752,7 +751,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         const SHARED_LOCK_WAIT_MAX_MS: u64 = 100;
         let mut timeout = 5;
         loop {
-            if self.is_exclusive_lock_requested(&self.config.data_dir)? {
+            if self.is_exclusive_lock_requested()? {
                 debug!("Exclusive lock requested, waiting for {}ms before requesting a shared lock again", timeout);
                 thread::sleep(std::time::Duration::from_millis(timeout));
                 timeout = std::cmp::min(timeout * 2, SHARED_LOCK_WAIT_MAX_MS);
@@ -771,11 +770,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// You may call this function in a separate thread or process to avoid blocking the main thread.
     /// However, the database will be exclusively locked, so all writes will be blocked during the tasks.
     pub fn do_maintenance_tasks(&mut self) -> Result<(), io::Error> {
-        let data_dir = self.config.data_dir.to_owned();
-        let data_dir_path = Path::new(&data_dir);
-        let active_log_path = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+        let active_log_path = &self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
         let active_target = fs::read_link(&active_log_path)?;
-        let active_metadata_path = data_dir_path.join(active_target);
+        let active_metadata_path = &self.data_dir.join(active_target);
         let active_log_md = fs::metadata(&active_log_path)?;
 
         let mut already_locked = false;
@@ -802,10 +799,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             debug!("Exclusive lock acquired, rotating active log file...");
 
             // Create a new active log segment
-            let (data_file_uuid, _) = DB::<Field>::create_segment_data_file(data_dir_path)?;
+            let (data_file_uuid, _) = DB::<Field>::create_segment_data_file(&self.data_dir)?;
             let (new_segment_num, _) =
-                DB::<Field>::create_segment_metadata_file(data_dir_path, &data_file_uuid)?;
-            DB::<Field>::set_active_segment(data_dir_path, new_segment_num)?;
+                DB::<Field>::create_segment_metadata_file(&self.data_dir, &data_file_uuid)?;
+            DB::<Field>::set_active_segment(&self.data_dir, new_segment_num)?;
 
             // The new active log file is not locked by this client so it cannot be touched.
             debug!("Active log file rotated, new segment: {}", new_segment_num);
@@ -813,12 +810,12 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.active_metadata_file = fs::OpenOptions::new()
                 .read(true)
                 .append(true)
-                .open(&data_dir_path.join(format!("metadata.{}", new_segment_num)))?;
+                .open(&self.data_dir.join(format!("metadata.{}", new_segment_num)))?;
 
             self.active_data_file = fs::OpenOptions::new()
                 .read(true)
                 .append(true)
-                .open(&data_dir_path.join(data_file_uuid.to_string()))?;
+                .open(&self.data_dir.join(data_file_uuid.to_string()))?;
 
             // Compact the rotated segment without a lock.
             // Since the rotated segment and the compacted segment based on it will be
@@ -837,8 +834,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     }
 
     fn compact_segment(&self, metadata_path: &Path) -> Result<(), io::Error> {
-        let data_dir_path = Path::new(&self.config.data_dir);
-
         debug!("Opening segment file {:?} for compaction", metadata_path);
         let mut metadata_file = fs::OpenOptions::new().read(true).open(metadata_path)?;
         let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
@@ -850,7 +845,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             ));
         }
 
-        let data_file_path = data_dir_path.join(metadata_header.uuid.to_string());
+        let data_file_path = &self.data_dir.join(metadata_header.uuid.to_string());
         let data_file = fs::OpenOptions::new().read(true).open(&data_file_path)?;
 
         debug!("Reading segment data into a BTreeMap");
@@ -905,7 +900,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let final_len = temp_metadata_file.seek(io::SeekFrom::End(0))?;
 
         debug!("Moving temporary files to their final locations");
-        let target_data_file_path = data_dir_path.join(new_data_uuid.to_string());
+        let target_data_file_path = &self.data_dir.join(new_data_uuid.to_string());
         fs::rename(&temp_data_path, &target_data_file_path)?;
         fs::rename(&temp_metadata_path, metadata_path)?;
 
@@ -1055,9 +1050,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         match self.is_active_metadata_valid()? {
             IsActiveMetadataValidResult::Ok => return Ok(true),
             IsActiveMetadataValidResult::ReplaceFile => {
-                let data_dir_path = Path::new(&self.config.data_dir);
-                let active_target = fs::read_link(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))?;
-                let active_path = data_dir_path.join(&active_target);
+                let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
+                let active_path = &self.data_dir.join(&active_target);
                 warn!(
                     "Metadata file \"{}\" is malformed ({} bytes), replacing it with an empty file",
                     active_target.display(),
@@ -1077,9 +1071,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 return Ok(false);
             }
             IsActiveMetadataValidResult::TruncateToSize(new_size) => {
-                let data_dir_path = Path::new(&self.config.data_dir);
-                let active_target = fs::read_link(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))?;
-                let active_path = data_dir_path.join(&active_target);
+                let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
+                let active_path = &self.data_dir.join(&active_target);
                 warn!(
                     "Metadata file \"{}\" is malformed ({} bytes), truncating it to {} bytes",
                     active_target.display(),
