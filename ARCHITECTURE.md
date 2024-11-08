@@ -286,3 +286,52 @@ file referencing it is written to a tmp file, and finally the metadata file is
 renamed to the correct name. If the metadata file is not present, the data file is effectively orphaned.
 
 This two-file model means that every time a record is accessed, two locks need to be acquired.
+
+## 2024-11-17 Index consistency
+
+An in-memory index can be inconsistent with the log file if another process writes to the log file after an index entry has been recorded in this process.
+To solve this, we need to refresh the index before every read operation.
+
+There are two ways to do this:
+
+1. Strong consistency: Read new data into the index before every read operation. This makes reads potentially very slow: there might be a lot of data to read since last refresh.
+2. Eventual consistency: Read new data into the index during maintenance tasks. This makes reads fast. The downside is that the index drifts out of sync with the log, until the next maintenance task.
+
+If we mandate that indexes must fit in the memory, we can postulate that indexes are complete. Even in the case where there is no entry in the index matching a query, we can be sure that there won't be a match in the log file either.
+
+This leads to the fact that a full table scan needs only ever be done for non-indexed tables.
+
+## 2024-11-17 Actions per API function
+
+The following actions are performed per API function:
+
+### `get` (find one record by primary key)
+
+1. (Strong) Refresh indexes
+2. If primary index contains PK  
+   a. Get segment number, segment index and read record from file
+   b. Return record
+3. Else, return None
+
+### `find_all` (find multiple records by non-PK key)
+
+1. (Strong) Refresh indexes
+2. If key is indexed and secondary index contains key
+   a. Get segment number, segment index and read record from file
+   b. Return record
+3. Else if key is indexed and secondary index does not contain key
+   a. Return empty list
+4. Else (key not indexed), do a full table scan from newest to oldest segment
+   a. Acquire shared locks on path, defer unlock
+   b. Check that path -> open file, otherwise restart
+   c. Read data file at offset and length from metadata file
+5. Return matching records
+
+### `upsert` (insert or update one record by primary key)
+
+1. Acquire exclusive lock on path
+2. Check that `active` -> path, otherwise restart
+3. Check that path -> open file, otherwise restart
+4. Write record to log file
+
+Note that writes have nothing to do with memtable indexes.
