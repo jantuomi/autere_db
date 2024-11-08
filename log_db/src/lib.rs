@@ -266,6 +266,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let active_data_path =
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = fs::OpenOptions::new()
+            .read(true)
             .append(true)
             .open(&active_data_path)?;
 
@@ -362,7 +363,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         // Write the record to the log
         let serialized = &record.serialize();
-        let record_offset = self.active_data_file.metadata()?.len();
+        let record_offset = self.active_data_file.seek(SeekFrom::End(0))?;
         let record_length = serialized.len() as u64;
         self.active_data_file.write_all(serialized)?;
 
@@ -397,12 +398,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Record appended to log file, lock released");
 
-        debug!("Updating memtables");
-        self.insert_to_memtables(record);
-
         let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
         assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
         assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
+        let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
+        assert_eq!(data_file_len, record_offset + record_length);
 
         Ok(())
     }
@@ -497,19 +497,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
 
         debug!("Record search complete");
-
-        let result_value = match &found_record {
-            Some(record) => record,
-            None => {
-                debug!("No record found for key {:?}", query_key);
-                return Ok(None);
-            }
-        };
-
         debug!("Found matching record in log file.");
-
-        debug!("Updating memtables");
-        self.insert_to_memtables(&result_value);
 
         Ok(found_record)
     }
@@ -696,37 +684,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
     }
 
-    fn insert_to_memtables(&mut self, record: &Record) {
-        let key = record.values[self.primary_key_index]
-            .as_indexable()
-            .expect("A non-indexable value was stored at key index");
-
-        if self.config.memtable_capacity == 0 {
-            return;
-        }
-
-        debug!(
-            "Inserting/updating record in primary memtable with key {:?} = {:?}",
-            &key, &record,
-        );
-
-        self.primary_memtable.set(&key, record);
-
-        for (field_index, value) in record.values.iter().enumerate() {
-            let field = &self.config.fields[field_index].0;
-            if let Some(smt_index) = self.get_secondary_memtable_index_by_field(field) {
-                debug!("Updating memtable for index on {:?}", field);
-
-                let memtable = &mut self.secondary_memtables[smt_index];
-                let key = value.as_indexable().expect("Primary key was not indexable");
-                let primary_key = record.values[self.primary_key_index]
-                    .as_indexable()
-                    .expect("Primary key was not indexable");
-                memtable.set(&key, &primary_key);
-            }
-        }
-    }
-
     fn request_exclusive_lock_on_active(&mut self) -> Result<(), io::Error> {
         // Create a lock on the exclusive lock request file to signal to readers that they should wait
         let lock_request_path = Path::new(&self.config.data_dir).join(EXCL_LOCK_REQUEST_FILENAME);
@@ -853,11 +810,23 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             // The new active log file is not locked by this client so it cannot be touched.
             debug!("Active log file rotated, new segment: {}", new_segment_num);
 
+            self.active_metadata_file = fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(&data_dir_path.join(format!("metadata.{}", new_segment_num)))?;
+
+            self.active_data_file = fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(&data_dir_path.join(data_file_uuid.to_string()))?;
+
             // Compact the rotated segment without a lock.
             // Since the rotated segment and the compacted segment based on it will be
             // a) read-only, and b) identical in effective content, there is no need to lock it.
             self.compact_segment(&active_metadata_path)?;
 
+            // The new active log file is not locked by this client so it cannot be touched.
+            debug!("Active log file rotated, new segment: {}", new_segment_num);
             debug!("Segment compacted");
         }
 

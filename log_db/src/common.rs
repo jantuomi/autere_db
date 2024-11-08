@@ -72,6 +72,27 @@ impl LogKeySet {
         LogKeySet { set }
     }
 
+    pub fn from_slice(keys: &[LogKey]) -> Self {
+        assert!(
+            !keys.is_empty(),
+            "LogKeySet::from_slice must be supplied a non-empty slice"
+        );
+        let mut set = HashSet::with_capacity(keys.len());
+        keys.iter().for_each(|key| {
+            set.insert(key.clone());
+        });
+        LogKeySet { set }
+    }
+
+    pub fn iter(&self) -> std::collections::hash_set::Iter<'_, LogKey> {
+        self.set.iter()
+    }
+
+    /// The number of LogKeys in the set.
+    pub fn len(&self) -> usize {
+        self.set.len()
+    }
+
     /// Insert a LogKey into the set.
     pub fn insert(&mut self, key: LogKey) {
         self.set.insert(key);
