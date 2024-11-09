@@ -31,6 +31,7 @@ pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     primary_key: Option<Field>,
     secondary_keys: Option<Vec<Field>>,
     write_durability: Option<WriteDurability>,
+    read_consistency: Option<ReadConsistency>,
 }
 
 impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
@@ -43,6 +44,7 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
             primary_key: None,
             secondary_keys: None,
             write_durability: None,
+            read_consistency: None,
         }
     }
 
@@ -97,6 +99,13 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         self
     }
 
+    /// The read consistency policy for the database.
+    /// A less strict policy will result in faster reads, but may return stale data.
+    pub fn read_consistency(&mut self, read_consistency: ReadConsistency) -> &mut Self {
+        self.read_consistency = Some(read_consistency);
+        self
+    }
+
     pub fn initialize(&self) -> Result<DB<Field>, io::Error> {
         let config = Config::<Field> {
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
@@ -119,6 +128,10 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
                 .write_durability
                 .clone()
                 .unwrap_or(WriteDurability::Flush),
+            read_consistency: self
+                .read_consistency
+                .clone()
+                .unwrap_or(ReadConsistency::Strong),
         };
 
         DB::initialize(&config)
@@ -134,16 +147,21 @@ struct Config<Field: Eq + Clone> {
     pub primary_key: Field,
     pub secondary_keys: Vec<Field>,
     pub write_durability: WriteDurability,
+    pub read_consistency: ReadConsistency,
 }
 
 pub struct DB<Field: Eq + Clone + Debug> {
     config: Config<Field>,
     data_dir: PathBuf,
+    active_segment_num: u16,
     active_metadata_file: fs::File,
     active_data_file: fs::File,
     primary_key_index: usize,
     primary_memtable: PrimaryMemtable,
     secondary_memtables: Vec<SecondaryMemtable>,
+
+    /// The position of the latest log entry that has been read into memtable indexes, plus one.
+    next_index_refresh_index: LogKey,
 }
 
 impl<Field: Eq + Clone + Debug> DB<Field> {
@@ -240,6 +258,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let active_symlink = Path::new(&config.data_dir).join(ACTIVE_SYMLINK_FILENAME);
 
         let active_target = fs::read_link(&active_symlink)?;
+        let active_segment_num = parse_segment_num(&active_target)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let active_metadata_path = Path::new(&config.data_dir).join(active_target);
         let mut active_metadata_file = APPEND_MODE.open(&active_metadata_path)?;
 
@@ -253,11 +273,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let db = DB::<Field> {
             config: config.clone(),
             data_dir: data_dir_path.to_path_buf(),
+            active_segment_num,
             active_metadata_file,
             active_data_file,
             primary_key_index,
             primary_memtable,
             secondary_memtables,
+            next_index_refresh_index: LogKey::new(1, 0),
         };
 
         // info!("Rebuilding memtable indexes...");
@@ -314,6 +336,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         metadata_buf.extend(&record_length.to_be_bytes());
 
         assert_eq!(metadata_buf.len(), 16);
+        let metadata_offset = self.active_metadata_file.seek(SeekFrom::End(0))?;
         self.active_metadata_file.write_all(&metadata_buf)?;
 
         // Flush and sync metadata to disk
@@ -331,13 +354,37 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Record appended to log file, lock released");
 
+        if self.config.read_consistency == ReadConsistency::ReadMyWrites {
+            debug!("Updating memtable indexes with new write...");
+
+            let sk_positions =
+                get_secondary_index_positions(&self.config.secondary_keys, &self.config.fields);
+            let index = (metadata_offset - METADATA_FILE_HEADER_SIZE as u64) / 16;
+            let log_key = LogKey::new(self.active_segment_num, index);
+
+            let pk = record
+                .at(self.primary_key_index)
+                .as_indexable()
+                .expect("Primary key must be an IndexableValue");
+            self.primary_memtable.set(&pk, &log_key);
+
+            for sk_pos in sk_positions {
+                let sk = record
+                    .at(sk_pos.schema_index)
+                    .as_indexable()
+                    .expect("Secondary key must be an IndexableValue");
+                self.secondary_memtables[sk_pos.secondary_index].set(&sk, &log_key);
+            }
+
+            debug!("Memtable indexes updated");
+        }
+
         let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
         assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
         assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
 
-        // Depending on write durability, the data might not be written to disk yet
-        //let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
-        //assert_eq!(data_file_len, record_offset + record_length);
+        let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
+        assert_eq!(data_file_len, record_offset + record_length);
 
         Ok(())
     }
@@ -371,68 +418,20 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             }
         };
 
+        if self.config.read_consistency == ReadConsistency::Strong {
+            debug!("Refreshing indexes before reading");
+            self.refresh_indexes()?;
+        }
+
         debug!("Looking up key {:?} in primary memtable", query_key);
-        let found = self.primary_memtable.get(&query_key);
-        if let Some(record) = found {
-            debug!("Found record in primary memtable: {:?}", record);
-            return Ok(Some(record.clone()));
+        if let Some(log_key) = self.primary_memtable.get(&query_key) {
+            debug!("Found record log key in primary memtable, reading from file");
+            let record = get_record_by_log_key(&self.data_dir, log_key)?;
+            return Ok(Some(record));
         }
 
-        debug!(
-            "No memtable entry found, looking up key {:?} in log file",
-            query_key
-        );
-
-        debug!(
-            "Matching records based on value at primary key index ({})",
-            &self.primary_key_index
-        );
-
-        let greatest = greatest_segment_number(&self.data_dir)?;
-        debug!("Searching segments {} through 1", greatest);
-
-        let mut found_record: Option<Record> = None;
-        for segment_num in (1..=greatest).rev() {
-            let segment_path = &self.data_dir.join(format!("metadata.{}", segment_num));
-
-            debug!(
-                "Opening segment {} in read mode and acquiring shared lock...",
-                segment_num
-            );
-
-            let mut metadata_file = READ_MODE.open(&segment_path)?;
-
-            request_shared_lock(&self.data_dir, &mut metadata_file)?;
-
-            let metadata_header = read_metadata_header(&mut metadata_file)?;
-
-            validate_metadata_header(&metadata_header)?;
-
-            let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
-            let data_file = READ_MODE.open(&data_path)?;
-
-            // We should not "request_shared_lock()" here because we do not want
-            // to give way to writers at this point. That would possibly lead to a deadlock.
-            data_file.lock_shared()?;
-
-            let mut reader = ReverseLogReader::new(metadata_file, data_file)?;
-
-            if let Some(found) = reader.find(|record| {
-                let record_key = record
-                    .at(self.primary_key_index)
-                    .as_indexable()
-                    .expect("Primary key must be indexable");
-                record_key == query_key
-            }) {
-                found_record = Some(found);
-                break;
-            }
-        }
-
-        debug!("Record search complete");
-        debug!("Found matching record in log file.");
-
-        Ok(found_record)
+        debug!("Key not found in primary memtable, returning None");
+        Ok(None)
     }
 
     /// Get a collection of records based on a field value.
@@ -473,25 +472,29 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             }
         };
 
+        if self.config.read_consistency == ReadConsistency::Strong {
+            debug!("Refreshing indexes before reading");
+            self.refresh_indexes()?;
+        }
+
         // Try to find a memtable with the queried key
         let found_memtable_index =
             get_secondary_memtable_index_by_field(&self.config.secondary_keys, field);
 
+        // If the requested key is indexed, we can just look it up in the memtable
+        // and return the matching records.
         if let Some(memtable_index) = found_memtable_index {
             debug!(
                 "Found suitable secondary index. Looking up key {:?} in the memtable",
                 query_key
             );
-            let records = self.secondary_memtables[memtable_index]
-                .find_all(&self.primary_memtable, &query_key);
-            debug!("Found matching key");
-            return Ok(records.iter().map(|record| record.clone()).collect());
+            let log_keys = self.secondary_memtables[memtable_index].find_all(&query_key);
+            let log_keys = log_keys.iter().cloned().collect::<Vec<_>>();
+            let records = get_records_by_log_keys(&self.data_dir, &log_keys)?;
+            return Ok(records);
         }
 
-        debug!(
-            "No memtable entry found, looking up key {:?} in log file",
-            query_key
-        );
+        debug!("Key is not indexed, looking up matching values in log file");
 
         // Get the index of the requested field
         let key_index = self
@@ -548,25 +551,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             }
         }
 
-        debug!("Record search complete");
-
         debug!(
-            "Number of matching records found in log file: {}",
+            "Record search complete, number of matching records found in log file: {}",
             found_records.len()
         );
-
-        if let Some(memtable_index) = found_memtable_index {
-            debug!("Inserting result set into secondary index");
-            let primary_values: Vec<IndexableValue> = found_records
-                .iter()
-                .map(|r| {
-                    r.at(self.primary_key_index)
-                        .as_indexable()
-                        .expect("A non-indexable value was stored at primary key index")
-                })
-                .collect();
-            self.secondary_memtables[memtable_index].set_all(&query_key, &primary_values);
-        }
 
         Ok(found_records)
     }
@@ -593,6 +581,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
             self.active_metadata_file = metadata_file;
             self.active_data_file = APPEND_MODE.open(&data_file_path)?;
+            self.active_segment_num = parse_segment_num(&active_metadata_path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             return Ok(false);
         } else {
@@ -648,6 +638,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.active_metadata_file = APPEND_MODE.open(&new_metadata_path)?;
             let new_data_path = &self.data_dir.join(data_uuid.to_string());
             self.active_data_file = APPEND_MODE.open(&new_data_path)?;
+            self.active_segment_num = parse_segment_num(&new_metadata_path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             // Compact the rotated segment without a lock.
             // Since the rotated segment and the compacted segment based on it will be
@@ -661,6 +653,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         self.active_metadata_file.unlock()?;
         self.active_data_file.unlock()?;
+
+        debug!("Refreshing indexes");
+        self.refresh_indexes()?;
+
+        debug!("Maintenance tasks complete");
 
         Ok(())
     }
@@ -677,12 +674,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Reading segment data into a BTreeMap");
         let mut map = BTreeMap::new();
         let forward_log_reader = ForwardLogReader::new(metadata_file, data_file);
-        for entry in forward_log_reader {
-            let primary_key = entry
+        for item in forward_log_reader {
+            let primary_key = item
+                .record
                 .at(self.primary_key_index)
                 .as_indexable()
                 .expect("Primary key was not indexable");
-            map.insert(primary_key, entry);
+            map.insert(primary_key, item.record);
         }
 
         debug!("Opening temporary files for writing compacted data");
@@ -732,6 +730,77 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         fs::rename(&temp_metadata_path, metadata_path)?;
 
         debug!("Compaction complete, resulting size: {}", final_len);
+        Ok(())
+    }
+
+    fn refresh_indexes(&mut self) -> Result<(), io::Error> {
+        let sk_positions =
+            get_secondary_index_positions(&self.config.secondary_keys, &self.config.fields);
+
+        // Read segments in order, starting from `self.next_index_refresh_index` and going up
+        let greatest = greatest_segment_number(&self.data_dir)?;
+
+        let next_segment_num = self.next_index_refresh_index.segment_num();
+        let mut next_segment_index = self.next_index_refresh_index.index();
+        debug!(
+            "Refreshing indexes from segment {} index {} onwards",
+            next_segment_num, next_segment_index
+        );
+
+        for segment_num in next_segment_num..=greatest {
+            let metadata_path = self.data_dir.join(format!("metadata.{}", segment_num));
+            let mut metadata_file = READ_MODE.open(&metadata_path)?;
+
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
+
+            let metadata_header = read_metadata_header(&mut metadata_file)?;
+            validate_metadata_header(&metadata_header)?;
+
+            let data_file_path = self.data_dir.join(metadata_header.uuid.to_string());
+            let data_file = READ_MODE.open(&data_file_path)?;
+
+            data_file.lock_shared()?;
+
+            let forward_log_reader =
+                ForwardLogReader::new_with_index(metadata_file, data_file, next_segment_index);
+
+            for item in forward_log_reader {
+                let pk = item
+                    .record
+                    .at(self.primary_key_index)
+                    .as_indexable()
+                    .expect("Primary key was not indexable");
+                let log_key = LogKey::new(segment_num, item.metadata_index);
+
+                debug!(
+                    "Inserting primary key {:?} -> segment {} index {}",
+                    pk, segment_num, item.metadata_index
+                );
+
+                self.primary_memtable.set(&pk, &log_key);
+                for sk_pos in &sk_positions {
+                    let sk = item
+                        .record
+                        .at(sk_pos.schema_index)
+                        .as_indexable()
+                        .expect("Secondary key was not indexable");
+                    self.secondary_memtables[sk_pos.secondary_index].set(&sk, &log_key);
+                }
+
+                next_segment_index = item.metadata_index + 1;
+            }
+
+            if segment_num < greatest {
+                next_segment_index = 0;
+            }
+        }
+
+        self.next_index_refresh_index = LogKey::new(greatest, next_segment_index);
+        debug!(
+            "Finished refreshing indexes, stored checkpoint to segment {} index {}",
+            greatest, next_segment_index
+        );
+
         Ok(())
     }
 }
@@ -850,5 +919,56 @@ mod tests {
             .expect("Failed to open file");
         let len = file.seek(SeekFrom::End(0)).expect("Failed to seek");
         assert_eq!(len, METADATA_FILE_HEADER_SIZE as u64 + n_recs * 16);
+    }
+
+    #[test]
+    fn test_get_one_by_log_key() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // Create segment
+        let (data_uuid1, _) = create_segment_data_file(&data_dir).unwrap();
+        let (segment_num1, _) = create_segment_metadata_file(&data_dir, &data_uuid1).unwrap();
+        set_active_segment(&data_dir, segment_num1).unwrap();
+
+        // Open segment1 and write record 3 times
+        let mut metadata_file = APPEND_MODE
+            .open(&data_dir.join(format!("metadata.{}", segment_num1)))
+            .unwrap();
+        let mut data_file = APPEND_MODE
+            .open(&data_dir.join(data_uuid1.to_string()))
+            .unwrap();
+
+        let mut data_offset: u64 = 0;
+        for i in 0..3 {
+            let record = Record::from(&[Value::Int(i)]);
+            let serialized = record.serialize();
+            let data_len = serialized.len() as u64;
+
+            data_file.write_all(&serialized).unwrap();
+
+            metadata_file.write_all(&data_offset.to_be_bytes()).unwrap();
+            metadata_file.write_all(&data_len.to_be_bytes()).unwrap();
+
+            metadata_file.flush().unwrap();
+            data_file.flush().unwrap();
+
+            data_offset += data_len;
+        }
+
+        // Check that `get_record_by_log_key` works
+        let rec = get_record_by_log_key(&data_dir, &LogKey::new(1, 0)).unwrap();
+        assert_eq!(rec.at(0), &Value::Int(0));
+
+        // Check that `get_records_by_log_keys` works
+        let recs = get_records_by_log_keys(
+            &data_dir,
+            &[LogKey::new(1, 0), LogKey::new(1, 1), LogKey::new(1, 2)],
+        )
+        .unwrap();
+        assert_eq!(recs[0].at(0), &Value::Int(0));
+        assert_eq!(recs[1].at(0), &Value::Int(1));
+        assert_eq!(recs[2].at(0), &Value::Int(2));
     }
 }

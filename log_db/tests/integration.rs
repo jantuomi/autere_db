@@ -207,7 +207,6 @@ fn test_upsert_fails_on_invalid_value_type() {
 }
 
 #[test]
-#[ignore]
 fn test_upsert_and_get_from_secondary_memtable() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
@@ -243,10 +242,6 @@ fn test_upsert_and_get_from_secondary_memtable() {
         Value::Bytes(vec![1, 2, 3]),
     ]);
     db.upsert(&record2).unwrap();
-
-    // Delete the DB so that any results must come from a memtable
-    fs::remove_file(Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME))
-        .expect("Failed to delete the DB log file");
 
     // There should be 2 Johns
     let johns = db

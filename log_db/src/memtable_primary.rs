@@ -2,14 +2,9 @@ use super::common::*;
 use std::collections::BTreeMap;
 
 pub struct PrimaryMemtable {
-    /// Map of records indexed by key. Used as a shared heap of records
-    /// for all secondary memtables also. Secondary memtables store an
-    /// IndexableValue as their record value, which is used to get
-    /// the actual record from the primary memtable `records` map.
-    ///
-    /// Note: it must be invariant that all memtables (primary and secondary)
-    /// contain the same keys.
-    records: BTreeMap<IndexableValue, Record>,
+    /// Map of record locations indexed by key. Use the `LogKey` values to look up
+    /// the actual records in the log files.
+    records: BTreeMap<IndexableValue, LogKey>,
 }
 
 impl PrimaryMemtable {
@@ -19,15 +14,11 @@ impl PrimaryMemtable {
         }
     }
 
-    pub fn set(&mut self, key: &IndexableValue, value: &Record) {
+    pub fn set(&mut self, key: &IndexableValue, value: &LogKey) {
         self.records.insert(key.clone(), value.clone());
     }
 
-    pub fn get(&mut self, key: &IndexableValue) -> Option<&Record> {
-        self.records.get(key)
-    }
-
-    pub fn get_without_update(&self, key: &IndexableValue) -> Option<&Record> {
+    pub fn get(&self, key: &IndexableValue) -> Option<&LogKey> {
         self.records.get(key)
     }
 }
