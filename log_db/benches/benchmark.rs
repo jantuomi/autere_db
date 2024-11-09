@@ -142,7 +142,7 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
                 let id = random_int(0, size as i64 + 1);
-                let _ = db.get(black_box(&RecordValue::Int(id)));
+                let _ = db.get(black_box(&Value::Int(id)));
             });
         });
     }
@@ -174,7 +174,7 @@ pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
                 let id = random_int(0, size as i64 + 1);
-                let _ = db.get(black_box(&RecordValue::Int(id)));
+                let _ = db.get(black_box(&Value::Int(id)));
             });
         });
     }
@@ -223,7 +223,7 @@ pub fn get_various_memtable_capacities(c: &mut Criterion) {
 
             b.iter(|| {
                 let id = random_int(0, 1000 + 1);
-                let _ = db.get(black_box(&RecordValue::Int(id)));
+                let _ = db.get(black_box(&Value::Int(id)));
             });
         });
     }

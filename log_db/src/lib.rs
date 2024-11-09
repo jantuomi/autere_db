@@ -8,7 +8,6 @@ mod memtable_primary;
 mod memtable_secondary;
 
 pub use common::*;
-use fs2::lock_contended_error;
 use fs2::FileExt;
 pub use log_reader_forward::ForwardLogReader;
 pub use log_reader_reverse::ReverseLogReader;
@@ -19,10 +18,9 @@ use std::fmt::Debug;
 use std::fs::{self};
 use std::io::Seek;
 use std::io::SeekFrom;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::thread;
 use uuid::Uuid;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
@@ -71,8 +69,8 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
     }
 
     /// The field schema of the database.
-    pub fn fields(&mut self, fields: Vec<(Field, RecordField)>) -> &mut Self {
-        self.fields = Some(fields.clone());
+    pub fn fields(&mut self, fields: &[(Field, RecordField)]) -> &mut Self {
+        self.fields = Some(fields.to_vec());
         self
     }
 
@@ -148,12 +146,6 @@ pub struct DB<Field: Eq + Clone + Debug> {
     secondary_memtables: Vec<SecondaryMemtable>,
 }
 
-enum IsActiveMetadataValidResult {
-    Ok,
-    ReplaceFile,
-    TruncateToSize(u64),
-}
-
 impl<Field: Eq + Clone + Debug> DB<Field> {
     /// Create a new database configuration builder.
     pub fn configure() -> ConfigBuilder<Field> {
@@ -189,10 +181,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // We have acquired the lock, check if the data directory is in a complete state
         // If not, initialize it, otherwise skip.
         if !fs::exists(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))? {
-            let (segment_uuid, _) = DB::<Field>::create_segment_data_file(data_dir_path)?;
-            let (segment_num, _) =
-                DB::<Field>::create_segment_metadata_file(data_dir_path, &segment_uuid)?;
-            DB::<Field>::set_active_segment(data_dir_path, segment_num)?;
+            let (segment_uuid, _) = create_segment_data_file(data_dir_path)?;
+            let (segment_num, _) = create_segment_metadata_file(data_dir_path, &segment_uuid)?;
+            set_active_segment(data_dir_path, segment_num)?;
 
             // Create the exclusive lock request file
             fs::OpenOptions::new()
@@ -250,26 +241,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         let active_target = fs::read_link(&active_symlink)?;
         let active_metadata_path = Path::new(&config.data_dir).join(active_target);
-        let mut active_metadata_file = fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&active_metadata_path)?;
+        let mut active_metadata_file = APPEND_MODE.open(&active_metadata_path)?;
 
-        let active_metadata_header = DB::<Field>::read_metadata_header(&mut active_metadata_file)?;
-
-        if active_metadata_header.version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported segment version",
-            ));
-        }
+        let active_metadata_header = read_metadata_header(&mut active_metadata_file)?;
+        validate_metadata_header(&active_metadata_header)?;
 
         let active_data_path =
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
-        let active_data_file = fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&active_data_path)?;
+        let active_data_file = APPEND_MODE.open(&active_data_path)?;
 
         let db = DB::<Field> {
             config: config.clone(),
@@ -293,73 +272,24 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// the existing record will be replaced by the supplied one.
     pub fn upsert(&mut self, record: &Record) -> Result<(), io::Error> {
         debug!("Upserting record: {:?}", record);
-        // Validate the record length
-        if record.values.len() != self.config.fields.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Record has an incorrect number of fields: {}, expected {}",
-                    record.values.len(),
-                    self.config.fields.len()
-                ),
-            ));
-        }
 
-        // Validate that record fields match schema types
-        for (i, (_, field)) in self.config.fields.iter().enumerate() {
-            match (&record.values[i], field) {
-                (
-                    RecordValue::Null,
-                    RecordField {
-                        nullable: true,
-                        field_type: _,
-                    },
-                ) => {}
-                (
-                    RecordValue::Int(_),
-                    RecordField {
-                        field_type: RecordFieldType::Int,
-                        ..
-                    },
-                ) => {}
-                (
-                    RecordValue::String(_),
-                    RecordField {
-                        field_type: RecordFieldType::String,
-                        ..
-                    },
-                ) => {}
-                (
-                    RecordValue::Bytes(_),
-                    RecordField {
-                        field_type: RecordFieldType::Bytes,
-                        ..
-                    },
-                ) => {}
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Record field {} has incorrect type: {:?}, expected {:?}",
-                            &i, &record.values[i], &field.field_type
-                        ),
-                    ))
-                }
-            }
-        }
+        record.validate(&self.config.fields)?;
 
         debug!("Record is valid");
         debug!("Opening file in append mode and acquiring exclusive lock...");
 
         // Acquire an exclusive lock for writing
-        self.request_exclusive_lock_on_active()?;
+        request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
 
-        if !self.ensure_active_file_is_open()? || !self.ensure_active_metadata_is_valid()? {
+        if !self.ensure_metadata_file_is_active()?
+            || !ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?
+        {
             // The log file has been rotated, so we must try again
             self.active_metadata_file.unlock()?;
-            self.active_data_file.unlock()?;
             return self.upsert(record);
         }
+
+        self.active_data_file.lock_exclusive()?;
 
         debug!("Exclusive lock acquired, appending to log file");
 
@@ -395,6 +325,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.active_metadata_file.sync_all()?;
         }
 
+        // Manually release the locks because the file handles are left open
         self.active_data_file.unlock()?;
         self.active_metadata_file.unlock()?;
 
@@ -403,15 +334,17 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
         assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
         assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
-        let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
-        assert_eq!(data_file_len, record_offset + record_length);
+
+        // Depending on write durability, the data might not be written to disk yet
+        //let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
+        //assert_eq!(data_file_len, record_offset + record_length);
 
         Ok(())
     }
 
     /// Get a record by its primary index value.
-    /// E.g. `db.get(RecordValue::Int(10))`.
-    pub fn get(&mut self, query_key: &RecordValue) -> Result<Option<Record>, io::Error> {
+    /// E.g. `db.get(Value::Int(10))`.
+    pub fn get(&mut self, query_key: &Value) -> Result<Option<Record>, io::Error> {
         let query_key_original = query_key;
         debug!(
             "Getting record with field {:?} = {:?}",
@@ -422,16 +355,19 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             "Queried value must be indexable",
         ))?;
 
-        match self.is_active_metadata_valid()? {
-            IsActiveMetadataValidResult::Ok => {}
+        match is_metadata_file_valid(&mut self.active_metadata_file)? {
+            IsMetadatafileValidResult::Ok => {}
             _ => {
                 debug!("Active metadata file is invalid, acquiring exclusive lock to start autorepair...");
-                self.request_exclusive_lock_on_active()?;
+                request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
 
-                self.ensure_active_metadata_is_valid()?;
-
+                ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?;
+                self.ensure_metadata_file_is_active()?;
+                // The lock should be dropped by RAII, but just in case
                 self.active_metadata_file.unlock()?;
-                self.active_data_file.unlock()?;
+
+                debug!("Active metadata file is now valid, retrying get operation...");
+                return self.get(query_key_original);
             }
         };
 
@@ -452,7 +388,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             &self.primary_key_index
         );
 
-        let greatest = DB::<Field>::greatest_segment_number(&self.data_dir)?;
+        let greatest = greatest_segment_number(&self.data_dir)?;
         debug!("Searching segments {} through 1", greatest);
 
         let mut found_record: Option<Record> = None;
@@ -464,21 +400,16 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 segment_num
             );
 
-            let mut metadata_file = fs::OpenOptions::new().read(true).open(&segment_path)?;
+            let mut metadata_file = READ_MODE.open(&segment_path)?;
 
-            self.request_shared_lock(&mut metadata_file)?;
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
 
-            let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
+            let metadata_header = read_metadata_header(&mut metadata_file)?;
 
-            if metadata_header.version != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unsupported segment version",
-                ));
-            }
+            validate_metadata_header(&metadata_header)?;
 
             let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
-            let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
+            let data_file = READ_MODE.open(&data_path)?;
 
             // We should not "request_shared_lock()" here because we do not want
             // to give way to writers at this point. That would possibly lead to a deadlock.
@@ -487,7 +418,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             let mut reader = ReverseLogReader::new(metadata_file, data_file)?;
 
             if let Some(found) = reader.find(|record| {
-                let record_key = record.values[self.primary_key_index]
+                let record_key = record
+                    .at(self.primary_key_index)
                     .as_indexable()
                     .expect("Primary key must be indexable");
                 record_key == query_key
@@ -505,11 +437,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Get a collection of records based on a field value.
     /// Indexes will be used if they contain the requested key.
-    pub fn find_all(
-        &mut self,
-        field: &Field,
-        query_key: &RecordValue,
-    ) -> Result<Vec<Record>, io::Error> {
+    pub fn find_all(&mut self, field: &Field, query_key: &Value) -> Result<Vec<Record>, io::Error> {
         // If querying by primary key, return the result of `get` wrapped in a vec.
         if field == &self.config.primary_key {
             return match self.get(query_key)? {
@@ -529,21 +457,25 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             "Queried value must be indexable",
         ))?;
 
-        match self.is_active_metadata_valid()? {
-            IsActiveMetadataValidResult::Ok => {}
+        match is_metadata_file_valid(&mut self.active_metadata_file)? {
+            IsMetadatafileValidResult::Ok => {}
             _ => {
                 debug!("Active metadata file is invalid, acquiring exclusive lock to start autorepair...");
-                self.request_exclusive_lock_on_active()?;
+                request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
 
-                self.ensure_active_metadata_is_valid()?;
-
+                ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?;
+                self.ensure_metadata_file_is_active()?;
+                // The lock should be dropped by RAII, but just in case
                 self.active_metadata_file.unlock()?;
-                self.active_data_file.unlock()?;
+
+                debug!("Active metadata file is now valid, retrying find_all operation...");
+                return self.find_all(field, query_key_original);
             }
         };
 
         // Try to find a memtable with the queried key
-        let found_memtable_index = self.get_secondary_memtable_index_by_field(field);
+        let found_memtable_index =
+            get_secondary_memtable_index_by_field(&self.config.secondary_keys, field);
 
         if let Some(memtable_index) = found_memtable_index {
             debug!(
@@ -572,7 +504,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 "Key not found in schema after initialize",
             ))?;
 
-        let greatest = DB::<Field>::greatest_segment_number(&self.data_dir)?;
+        let greatest = greatest_segment_number(&self.data_dir)?;
 
         let mut found_records = vec![];
         for segment_num in (1..=greatest).rev() {
@@ -583,11 +515,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 segment_num
             );
 
-            let mut metadata_file = fs::OpenOptions::new().read(true).open(&segment_path)?;
+            let mut metadata_file = READ_MODE.open(&segment_path)?;
 
-            self.request_shared_lock(&mut metadata_file)?;
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
 
-            let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
+            let metadata_header = read_metadata_header(&mut metadata_file)?;
 
             if metadata_header.version != 1 {
                 return Err(io::Error::new(
@@ -597,7 +529,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             }
 
             let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
-            let data_file = fs::OpenOptions::new().read(true).open(&data_path)?;
+            let data_file = READ_MODE.open(&data_path)?;
 
             // We should not "request_shared_lock()" here because we do not want
             // to give way to writers at this point. That would possibly lead to a deadlock.
@@ -606,7 +538,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             let reader = ReverseLogReader::new(metadata_file, data_file)?;
 
             for record in reader {
-                let record_key = record.values[key_index]
+                let record_key = record
+                    .at(key_index)
                     .as_indexable()
                     .expect("Secondary key must be indexable");
                 if record_key == query_key {
@@ -627,7 +560,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             let primary_values: Vec<IndexableValue> = found_records
                 .iter()
                 .map(|r| {
-                    r.values[self.primary_key_index]
+                    r.at(self.primary_key_index)
                         .as_indexable()
                         .expect("A non-indexable value was stored at primary key index")
                 })
@@ -638,127 +571,32 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(found_records)
     }
 
-    fn get_secondary_memtable_index_by_field(&self, field: &Field) -> Option<usize> {
-        self.config
-            .secondary_keys
-            .iter()
-            .position(|schema_field| schema_field == field)
-    }
-
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
     /// If the segment has been rotated, the handle will be closed and reopened.
     /// Returns `false` if the file has been rotated and the handle has been reopened, `true` otherwise.
-    fn ensure_active_file_is_open(&mut self) -> Result<bool, io::Error> {
-        let active_target = fs::read_link(&self.data_dir.join("active"))?;
+    fn ensure_metadata_file_is_active(&mut self) -> Result<bool, io::Error> {
+        let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
         let active_metadata_path = &self.data_dir.join(active_target);
 
         let correct = is_file_same_as_path(&self.active_metadata_file, &active_metadata_path)?;
         if !correct {
             debug!("Metadata file has been rotated. Reopening...");
-            let mut metadata_file = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&active_metadata_path)?;
+            let mut metadata_file = APPEND_MODE.open(&active_metadata_path)?;
 
-            self.request_shared_lock(&mut metadata_file)?;
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
 
-            let metadata_header =
-                DB::<Field>::read_metadata_header(&mut self.active_metadata_file)?;
+            let metadata_header = read_metadata_header(&mut self.active_metadata_file)?;
 
-            if metadata_header.version != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unsupported segment version",
-                ));
-            }
+            validate_metadata_header(&metadata_header)?;
 
             let data_file_path = &self.data_dir.join(metadata_header.uuid.to_string());
 
             self.active_metadata_file = metadata_file;
-            self.active_data_file = fs::OpenOptions::new().append(true).open(&data_file_path)?;
+            self.active_data_file = APPEND_MODE.open(&data_file_path)?;
 
             return Ok(false);
         } else {
             return Ok(true);
-        }
-    }
-
-    fn request_exclusive_lock_on_active(&mut self) -> Result<(), io::Error> {
-        // Create a lock on the exclusive lock request file to signal to readers that they should wait
-        let lock_request_path = &self.data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
-        let lock_request_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true) // When requesting a lock, we need to have either read or write permissions
-            .open(&lock_request_path)?;
-
-        // Attempt to acquire an exclusive lock on the lock request file
-        // This will block until the lock is acquired
-        lock_request_file.lock_exclusive()?;
-
-        // Check that the exclusive lock request file is still the same as the one we opened
-        // NOTE: this isn't strictly necessary, but it's a good sanity check. Disabled for now.
-        // if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
-        //     // The lock request file has been removed
-        //     return Err(io::Error::new(
-        //         io::ErrorKind::Other,
-        //         "Lock request file was removed unexpectedly",
-        //     ));
-        // }
-
-        // Acquire an exclusive lock on the segment files
-        self.active_metadata_file.lock_exclusive()?;
-        self.active_data_file.lock_exclusive()?;
-
-        // Unlock the request file
-        lock_request_file.unlock()?;
-
-        Ok(())
-    }
-
-    fn is_exclusive_lock_requested(&self) -> Result<bool, io::Error> {
-        let lock_request_path = &self.data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
-        let lock_request_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true) // When requesting a lock, we need to have either read or write permissions
-            .open(&lock_request_path)?;
-
-        // Attempt to acquire a shared lock on the lock request file
-        // If the file is already locked, return false
-        match lock_request_file.try_lock_shared() {
-            Err(e) => {
-                if e.kind() == lock_contended_error().kind() {
-                    return Ok(true);
-                }
-                return Err(e);
-            }
-            Ok(_) => {
-                // Check that the exclusive lock request file is still the same as the one we opened
-                if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
-                    // The lock request file has been removed
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "Lock request file was removed unexpectedly",
-                    ));
-                }
-
-                lock_request_file.unlock()?;
-                return Ok(false);
-            }
-        }
-    }
-
-    fn request_shared_lock(&self, file: &mut fs::File) -> Result<(), io::Error> {
-        const SHARED_LOCK_WAIT_MAX_MS: u64 = 100;
-        let mut timeout = 5;
-        loop {
-            if self.is_exclusive_lock_requested()? {
-                debug!("Exclusive lock requested, waiting for {}ms before requesting a shared lock again", timeout);
-                thread::sleep(std::time::Duration::from_millis(timeout));
-                timeout = std::cmp::min(timeout * 2, SHARED_LOCK_WAIT_MAX_MS);
-            } else {
-                file.lock_shared()?;
-                return Ok(());
-            }
         }
     }
 
@@ -776,14 +614,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let active_log_md = fs::metadata(&active_log_path)?;
 
         let mut already_locked = false;
-        match self.is_active_metadata_valid()? {
-            IsActiveMetadataValidResult::Ok => {}
+        match is_metadata_file_valid(&mut self.active_metadata_file)? {
+            IsMetadatafileValidResult::Ok => {}
             _ => {
                 debug!("Active metadata is invalid, acquiring exclusive lock...");
-                self.request_exclusive_lock_on_active()?;
+                request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
                 already_locked = true;
 
-                self.ensure_active_metadata_is_valid()?;
+                ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?;
             }
         };
 
@@ -793,29 +631,23 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             debug!("Starting rotation");
             if !already_locked {
                 debug!("Requesting exclusive lock on active log file...");
-                self.request_exclusive_lock_on_active()?;
+                request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
             }
 
             debug!("Exclusive lock acquired, rotating active log file...");
 
             // Create a new active log segment
-            let (data_file_uuid, _) = DB::<Field>::create_segment_data_file(&self.data_dir)?;
-            let (new_segment_num, _) =
-                DB::<Field>::create_segment_metadata_file(&self.data_dir, &data_file_uuid)?;
-            DB::<Field>::set_active_segment(&self.data_dir, new_segment_num)?;
+            let (data_uuid, _) = create_segment_data_file(&self.data_dir)?;
+            let (new_segment_num, _) = create_segment_metadata_file(&self.data_dir, &data_uuid)?;
+            set_active_segment(&self.data_dir, new_segment_num)?;
 
             // The new active log file is not locked by this client so it cannot be touched.
             debug!("Active log file rotated, new segment: {}", new_segment_num);
 
-            self.active_metadata_file = fs::OpenOptions::new()
-                .read(true)
-                .append(true)
-                .open(&self.data_dir.join(format!("metadata.{}", new_segment_num)))?;
-
-            self.active_data_file = fs::OpenOptions::new()
-                .read(true)
-                .append(true)
-                .open(&self.data_dir.join(data_file_uuid.to_string()))?;
+            let new_metadata_path = &self.data_dir.join(format!("metadata.{}", new_segment_num));
+            self.active_metadata_file = APPEND_MODE.open(&new_metadata_path)?;
+            let new_data_path = &self.data_dir.join(data_uuid.to_string());
+            self.active_data_file = APPEND_MODE.open(&new_data_path)?;
 
             // Compact the rotated segment without a lock.
             // Since the rotated segment and the compacted segment based on it will be
@@ -835,24 +667,19 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     fn compact_segment(&self, metadata_path: &Path) -> Result<(), io::Error> {
         debug!("Opening segment file {:?} for compaction", metadata_path);
-        let mut metadata_file = fs::OpenOptions::new().read(true).open(metadata_path)?;
-        let metadata_header = DB::<Field>::read_metadata_header(&mut metadata_file)?;
-
-        if metadata_header.version != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported segment version",
-            ));
-        }
+        let mut metadata_file = READ_MODE.open(metadata_path)?;
+        let metadata_header = read_metadata_header(&mut metadata_file)?;
+        validate_metadata_header(&metadata_header)?;
 
         let data_file_path = &self.data_dir.join(metadata_header.uuid.to_string());
-        let data_file = fs::OpenOptions::new().read(true).open(&data_file_path)?;
+        let data_file = READ_MODE.open(&data_file_path)?;
 
         debug!("Reading segment data into a BTreeMap");
         let mut map = BTreeMap::new();
         let forward_log_reader = ForwardLogReader::new(metadata_file, data_file);
         for entry in forward_log_reader {
-            let primary_key = entry.values[self.primary_key_index]
+            let primary_key = entry
+                .at(self.primary_key_index)
                 .as_indexable()
                 .expect("Primary key was not indexable");
             map.insert(primary_key, entry);
@@ -861,17 +688,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         debug!("Opening temporary files for writing compacted data");
         let temp_data_file = tempfile::NamedTempFile::new()?;
         let temp_data_path = temp_data_file.as_ref();
-        let mut temp_data_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(temp_data_path)?;
+        let mut temp_data_file = APPEND_MODE.open(temp_data_path)?;
 
         let temp_metadata_file = tempfile::NamedTempFile::new()?;
         let temp_metadata_path = temp_metadata_file.as_ref();
-        let mut temp_metadata_file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(temp_metadata_path)?;
+        let mut temp_metadata_file = APPEND_MODE.open(temp_metadata_path)?;
 
         let new_data_uuid = Uuid::new_v4();
 
@@ -897,6 +718,12 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             offset += len;
         }
 
+        // Sync the temporary files to disk
+        // This is fine to do without consulting WriteDurability because this is a one-off
+        // operation that is not part of the normal write path.
+        temp_metadata_file.flush()?;
+        temp_data_file.flush()?;
+
         let final_len = temp_metadata_file.seek(io::SeekFrom::End(0))?;
 
         debug!("Moving temporary files to their final locations");
@@ -906,193 +733,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Compaction complete, resulting size: {}", final_len);
         Ok(())
-    }
-
-    /// Get the number of the segment with the greatest ordinal.
-    /// This is the newest segment, i.e. the one that is pointed to by the `active` symlink.
-    /// If there are no segments yet, returns 0.
-    fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
-        let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
-
-        if !fs::exists(&active_symlink)? {
-            return Ok(0);
-        }
-
-        let segment_metadata_path = fs::read_link(&active_symlink)?;
-        let filename = segment_metadata_path
-            .file_name()
-            .expect("No filename in symlink")
-            .to_str()
-            .expect("Filename was not valid UTF-8");
-
-        // parse number from format "metadata.1"
-        let segment_number = filename
-            .split('.')
-            .last()
-            .expect("Filename did not have a number")
-            .parse::<u16>();
-
-        segment_number.map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Failed to parse segment number from filename",
-            )
-        })
-    }
-
-    /// Create a new segment data file and return its UUID.
-    /// A data file contains the segment data, tightly packed without separators.
-    /// An accompanying metadata file is required to interpret the data.
-    fn create_segment_data_file(data_dir_path: &Path) -> Result<(Uuid, PathBuf), io::Error> {
-        let uuid = Uuid::new_v4();
-        let new_segment_path = data_dir_path.join(uuid.to_string());
-        fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(&new_segment_path)?;
-
-        Ok((uuid, new_segment_path))
-    }
-
-    /// Create a new segment metadata file and return its number and path.
-    /// A metadata file contains the segment metadata, including the UUID of the data file.
-    /// See `ARCHITECTURE.md` for the file format.
-    fn create_segment_metadata_file(
-        data_dir_path: &Path,
-        data_file_uuid: &Uuid,
-    ) -> Result<(u16, PathBuf), io::Error> {
-        let current_greatest_num = DB::<Field>::greatest_segment_number(data_dir_path)?;
-        let new_num = current_greatest_num + 1;
-
-        let metadata_filename = format!("metadata.{}", new_num);
-        let metadata_path = data_dir_path.join(metadata_filename);
-
-        let mut metadata_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(&metadata_path)?;
-
-        let metadata_header = MetadataHeader {
-            version: 1,
-            uuid: *data_file_uuid,
-        };
-
-        metadata_file.write_all(&metadata_header.serialize())?;
-
-        let len = metadata_file.seek(io::SeekFrom::End(0))?;
-        assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
-        assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
-
-        Ok((new_num, metadata_path))
-    }
-
-    /// Set the active segment to the segment with the given ordinal number.
-    fn set_active_segment(data_dir_path: &Path, segment_num: u16) -> Result<(), io::Error> {
-        let tmp_uuid = Uuid::new_v4();
-        let tmp_filename = format!("active_{}", tmp_uuid.to_string());
-        let tmp_path = data_dir_path.join(tmp_filename);
-
-        let metadata_filename = format!("metadata.{}", segment_num);
-        let metadata_path = Path::new(&metadata_filename);
-        let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
-
-        symlink(&metadata_path, &tmp_path)?;
-        fs::rename(&tmp_path, &active_symlink)?;
-
-        Ok(())
-    }
-
-    /// Reads the metadata header from the metadata file.
-    /// Leaves the file seek head at the beginning of the records, after the header.
-    fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHeader, io::Error> {
-        metadata_file.seek(SeekFrom::Start(0))?;
-        let mut buf = [0u8; METADATA_FILE_HEADER_SIZE];
-        metadata_file.read_exact(&mut buf)?;
-
-        let header = MetadataHeader::deserialize(&buf);
-        Ok(header)
-    }
-
-    fn is_active_metadata_valid(&mut self) -> Result<IsActiveMetadataValidResult, io::Error> {
-        let size = self.active_metadata_file.seek(SeekFrom::End(0))? as usize;
-
-        if size < METADATA_FILE_HEADER_SIZE {
-            return Ok(IsActiveMetadataValidResult::ReplaceFile);
-        }
-
-        // The data section must be a multiple of 16 bytes.
-        // Otherwise, the non-aligned part of the file is dropped.
-        let data_section_len = size - METADATA_FILE_HEADER_SIZE;
-        let remainder = data_section_len % 16;
-        if remainder != 0 {
-            return Ok(IsActiveMetadataValidResult::TruncateToSize(
-                (size - remainder) as u64,
-            ));
-        }
-
-        Ok(IsActiveMetadataValidResult::Ok)
-    }
-
-    /// Check that the active metadata file is well-formed and repair it if necessary.
-    /// The metadata file is considered well-formed if its size is, in pseudocode, `header_size + n * record_size`.
-    /// If the file is not well-formed, it is truncated to the last well-formed record using
-    /// a temporary file and an atomic move operation.
-    ///
-    /// `self.active_metadata_file` must be a locked file handle opened with read permissions.
-    /// The function leaves the seek head in an unspecified position.
-    ///
-    /// Returns `false` if the file was repaired and rotated, `true` if no action was taken.
-    fn ensure_active_metadata_is_valid(&mut self) -> Result<bool, io::Error> {
-        let current_len = self.active_metadata_file.seek(SeekFrom::End(0))? as usize;
-
-        match self.is_active_metadata_valid()? {
-            IsActiveMetadataValidResult::Ok => return Ok(true),
-            IsActiveMetadataValidResult::ReplaceFile => {
-                let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
-                let active_path = &self.data_dir.join(&active_target);
-                warn!(
-                    "Metadata file \"{}\" is malformed ({} bytes), replacing it with an empty file",
-                    active_target.display(),
-                    current_len,
-                );
-                let mut tmp_file = tempfile::NamedTempFile::new()?;
-
-                let header = MetadataHeader {
-                    version: 1,
-                    uuid: Uuid::new_v4(),
-                };
-
-                tmp_file.write_all(&header.serialize())?;
-                fs::rename(tmp_file.path(), active_path)?;
-
-                debug!("Replaced metadata file");
-                return Ok(false);
-            }
-            IsActiveMetadataValidResult::TruncateToSize(new_size) => {
-                let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
-                let active_path = &self.data_dir.join(&active_target);
-                warn!(
-                    "Metadata file \"{}\" is malformed ({} bytes), truncating it to {} bytes",
-                    active_target.display(),
-                    current_len,
-                    new_size
-                );
-
-                let mut tmp_file = tempfile::NamedTempFile::new()?;
-
-                let mut buf = vec![0; new_size as usize];
-                self.active_metadata_file.seek(SeekFrom::Start(0))?;
-                self.active_metadata_file.read_exact(&mut buf)?;
-
-                tmp_file.write_all(&buf)?;
-                fs::rename(tmp_file.path(), active_path)?;
-
-                debug!("Truncated metadata file");
-                return Ok(false);
-            }
-        }
     }
 }
 
@@ -1116,16 +756,14 @@ mod tests {
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
             .segment_size(segment_size)
-            .fields(vec![(Field::Id, RecordField::int())])
+            .fields(&[(Field::Id, RecordField::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to create DB");
 
         // Insert records with same value until we reach the capacity
         for _ in 0..capacity {
-            let record = Record {
-                values: vec![RecordValue::Int(0 as i64)],
-            };
+            let record = Record::from(&[Value::Int(0 as i64)]);
             db.upsert(&record).expect("Failed to insert record");
         }
 
@@ -1134,9 +772,7 @@ mod tests {
             .expect("Failed to do maintenance tasks");
 
         // Insert one extra with different value, this goes into another segment
-        let record = Record {
-            values: vec![RecordValue::Int(1 as i64)],
-        };
+        let record = Record::from(&[Value::Int(1 as i64)]);
         db.upsert(&record).expect("Failed to insert record");
 
         // Check that rotation resulted in 2 segments
@@ -1151,22 +787,22 @@ mod tests {
 
         // Check that the records can be read
         let rec0 = db
-            .get(&RecordValue::Int(0 as i64))
+            .get(&Value::Int(0 as i64))
             .expect("Failed to get record")
             .expect("Record not found");
 
-        assert!(match rec0.values[0] {
-            RecordValue::Int(0) => true,
+        assert!(match rec0.at(0) {
+            Value::Int(0) => true,
             _ => false,
         });
 
         let rec1 = db
-            .get(&RecordValue::Int(1 as i64))
+            .get(&Value::Int(1 as i64))
             .expect("Failed to get record")
             .expect("Record not found");
 
-        assert!(match rec1.values[0] {
-            RecordValue::Int(1) => true,
+        assert!(match rec1.at(0) {
+            Value::Int(1) => true,
             _ => false,
         });
     }
@@ -1180,7 +816,7 @@ mod tests {
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
             .memtable_capacity(0)
-            .fields(vec![(Field::Id, RecordField::int())])
+            .fields(&[(Field::Id, RecordField::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to create DB");
@@ -1188,32 +824,28 @@ mod tests {
         // Insert records
         let n_recs = 100;
         for i in 0..n_recs {
-            let record = Record {
-                values: vec![RecordValue::Int(i as i64)],
-            };
+            let record = Record::from(&[Value::Int(i as i64)]);
             db.upsert(&record).expect("Failed to insert record");
         }
 
         // Open the segment file and write garbage to it to simulate corruption
         let segment_metadata_path = data_dir.join("metadata.1");
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .append(true)
+        let mut file = APPEND_MODE
             .open(&segment_metadata_path)
             .expect("Failed to open file");
 
         file.write_all(&[0, 1, 2, 3])
             .expect("Failed to write garbage");
+        file.flush().unwrap();
 
         let len = file.seek(SeekFrom::End(0)).expect("Failed to seek");
         assert_ne!(len, METADATA_FILE_HEADER_SIZE as u64 + n_recs * 16);
 
         // Try to read from the file, triggering autorepair
-        db.get(&RecordValue::Int(0)).expect("Failed to get record");
+        db.get(&Value::Int(0)).expect("Failed to get record");
 
         // Reopen file and check that it has the correct size
-        let mut file = fs::OpenOptions::new()
-            .read(true)
+        let mut file = READ_MODE
             .open(&segment_metadata_path)
             .expect("Failed to open file");
         let len = file.seek(SeekFrom::End(0)).expect("Failed to seek");

@@ -89,8 +89,8 @@ mod tests {
         let last_record = reverse_log_reader
             .next()
             .expect("Failed to read the last record");
-        assert!(match last_record.values.as_slice() {
-            [RecordValue::Bytes(bytes)] => bytes.len() == 256,
+        assert!(match last_record.values() {
+            [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });
 

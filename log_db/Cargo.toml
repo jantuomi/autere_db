@@ -9,6 +9,7 @@ crate-type = ["lib"]
 [dependencies]
 fs2 = "0.4.3"
 log = "0.4.22"
+once_cell = "1.20.2"
 priority-queue = "2.1.1"
 tempfile = "3.13.0"
 thiserror = "2.0.1"

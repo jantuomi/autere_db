@@ -86,8 +86,8 @@ mod tests {
         let first_record = forward_log_reader
             .next()
             .expect("Failed to read the first record");
-        assert!(match first_record.values.as_slice() {
-            [RecordValue::Bytes(bytes)] => bytes.len() == 256,
+        assert!(match first_record.values() {
+            [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });
 

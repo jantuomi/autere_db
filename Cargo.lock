@@ -514,6 +514,7 @@ dependencies = [
  "env_logger",
  "fs2",
  "log",
+ "once_cell",
  "priority-queue",
  "rand",
  "serial_test",

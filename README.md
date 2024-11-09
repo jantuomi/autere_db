@@ -59,8 +59,8 @@ let mut db = DB::configure()
 // Define a record matching the `fields` schema
 let record = Record {
   values: vec![
-    RecordValue::Int(1),
-    RecordValue::Bytes(vec![1, 2, 3, 4]),
+    Value::Int(1),
+    Value::Bytes(vec![1, 2, 3, 4]),
   ],
 };
 
@@ -68,7 +68,7 @@ let record = Record {
 db.upsert(&record)?;
 
 // Get the record by primary key
-let found = db.get(RecordValue::Int(1))?;
+let found = db.get(Value::Int(1))?;
 ```
 
 ## Tests
@@ -101,14 +101,14 @@ maturin build --release     # for the release version
 Then you can use the Python bindings like so:
 
 ```python
-from log_db_py import DB, RecordValue, RecordField, Record
+from log_db_py import DB, Value, RecordField, Record
 
 config = DB.configure();
 config.primary_key = "id"
 config.fields = [("id", RecordField.int().nullable())]
 
 db = config.initialize()
-db.upsert(Record(RecordValue.int(10)))
+db.upsert(Record(Value.int(10)))
 ```
 
 ## Copyright and license

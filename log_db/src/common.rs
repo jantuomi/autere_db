@@ -1,9 +1,12 @@
+use fs2::{lock_contended_error, FileExt};
+use once_cell::sync::Lazy;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt::Display;
-use std::fs::{metadata, File};
-use std::io::{self};
+use std::fs::{self, metadata, File};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
 use uuid::Uuid;
 
 // For Unix-like systems
@@ -138,6 +141,22 @@ impl Ord for LogKeySet {
     }
 }
 
+pub static APPEND_MODE: Lazy<fs::OpenOptions> = Lazy::new(|| {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).append(true);
+    options
+});
+pub static READ_MODE: Lazy<fs::OpenOptions> = Lazy::new(|| {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    options
+});
+pub static WRITE_MODE: Lazy<fs::OpenOptions> = Lazy::new(|| {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    options
+});
+
 pub struct MetadataHeader {
     pub version: u8,
     pub uuid: Uuid,
@@ -169,16 +188,11 @@ impl MetadataHeader {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WriteDurability {
-    /// Changes are written to an application-level write buffer without flushing to the OS write buffer or syncing to disk.
-    /// The buffered writer will batch writes to the OS buffer for maximum performance.
-    /// Offers the lowest durability guarantees but is very fast.
-    Async,
     /// Changes are written to the OS write buffer but not immediately synced to disk.
-    /// Offers better durability guarantees than Async but is slower.
     /// This is generally recommended. Most OSes will sync the write buffer to disk within a few seconds.
     Flush,
     /// Changes are written to the OS write buffer and synced to disk immediately.
-    /// Offers the best durability guarantees but is the slowest.
+    /// Offers the best durability guarantees but is a lot slower.
     FlushSync,
 }
 
@@ -246,7 +260,7 @@ impl RecordField {
 }
 
 #[derive(Debug, Clone)]
-pub enum RecordValue {
+pub enum Value {
     Null,
     Int(i64),
     Float(f64),
@@ -254,30 +268,30 @@ pub enum RecordValue {
     Bytes(Vec<u8>),
 }
 
-impl RecordValue {
+impl Value {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
-            RecordValue::Null => {
+            Value::Null => {
                 vec![0] // Tag for Null
             }
-            RecordValue::Int(i) => {
+            Value::Int(i) => {
                 let mut bytes = vec![1]; // Tag for Int
                 bytes.extend(&i.to_be_bytes());
                 bytes
             }
-            RecordValue::Float(f) => {
+            Value::Float(f) => {
                 let mut bytes = vec![2]; // Tag for Float
                 bytes.extend(&f.to_be_bytes());
                 bytes
             }
-            RecordValue::String(s) => {
+            Value::String(s) => {
                 let mut bytes = vec![3]; // Tag for String
                 let length = s.len() as u64;
                 bytes.extend(&length.to_be_bytes());
                 bytes.extend(s.as_bytes());
                 bytes
             }
-            RecordValue::Bytes(b) => {
+            Value::Bytes(b) => {
                 let mut bytes = vec![4]; // Tag for Bytes
                 let length = b.len() as u64;
                 bytes.extend(&length.to_be_bytes());
@@ -287,26 +301,26 @@ impl RecordValue {
         }
     }
 
-    /// Deserialize a RecordValue from a byte slice.
-    /// Returns the deserialized RecordValue and the number of bytes consumed.
-    pub fn deserialize(bytes: &[u8]) -> (RecordValue, usize) {
+    /// Deserialize a Value from a byte slice.
+    /// Returns the deserialized Value and the number of bytes consumed.
+    pub fn deserialize(bytes: &[u8]) -> (Value, usize) {
         match bytes[0] {
-            0 => (RecordValue::Null, 1),
+            0 => (Value::Null, 1),
             1 => {
                 let mut int_bytes = [0; 8];
                 int_bytes.copy_from_slice(&bytes[1..1 + 8]);
-                (RecordValue::Int(i64::from_be_bytes(int_bytes)), 1 + 8)
+                (Value::Int(i64::from_be_bytes(int_bytes)), 1 + 8)
             }
             2 => {
                 let mut float_bytes = [0; 8];
                 float_bytes.copy_from_slice(&bytes[1..1 + 8]);
-                (RecordValue::Float(f64::from_be_bytes(float_bytes)), 1 + 8)
+                (Value::Float(f64::from_be_bytes(float_bytes)), 1 + 8)
             }
             3 => {
                 let length_bytes = &bytes[1..1 + 8];
                 let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
                 (
-                    RecordValue::String(
+                    Value::String(
                         String::from_utf8(bytes[1 + 8..1 + 8 + length].to_vec()).unwrap(),
                     ),
                     1 + 8 + length,
@@ -316,7 +330,7 @@ impl RecordValue {
                 let length_bytes = &bytes[1..1 + 8];
                 let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
                 (
-                    RecordValue::Bytes(bytes[1 + 8..1 + 8 + length].to_vec()),
+                    Value::Bytes(bytes[1 + 8..1 + 8 + length].to_vec()),
                     1 + 8 + length,
                 )
             }
@@ -326,22 +340,20 @@ impl RecordValue {
 
     pub fn as_indexable(&self) -> Option<IndexableValue> {
         match self {
-            RecordValue::Int(i) => Some(IndexableValue::Int(*i)),
-            RecordValue::String(s) => Some(IndexableValue::String(s.clone())),
+            Value::Int(i) => Some(IndexableValue::Int(*i)),
+            Value::String(s) => Some(IndexableValue::String(s.clone())),
             _ => None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Record {
-    pub values: Vec<RecordValue>,
-}
+pub struct Record(Vec<Value>);
 
 impl Record {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        for value in &self.values {
+        for value in &self.0 {
             bytes.extend(value.serialize());
         }
         bytes
@@ -351,12 +363,89 @@ impl Record {
         let mut values = Vec::new();
         let mut start = 0;
         while start < bytes.len() {
-            let (rv, consumed) = RecordValue::deserialize(&bytes[start..]);
+            let (rv, consumed) = Value::deserialize(&bytes[start..]);
             values.push(rv);
             start += consumed;
         }
-        Record { values }
+        Record(values)
     }
+
+    pub fn from(values: &[Value]) -> Record {
+        Record(values.to_vec())
+    }
+
+    pub fn values(&self) -> &[Value] {
+        &self.0
+    }
+
+    pub fn at(&self, index: usize) -> &Value {
+        &self.0[index]
+    }
+
+    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, RecordField)>) -> Result<(), io::Error> {
+        // Validate the record length
+        if self.0.len() != schema.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Record has an incorrect number of fields: {}, expected {}",
+                    self.0.len(),
+                    schema.len()
+                ),
+            ));
+        }
+
+        // Validate that record fields match schema types
+        for (i, (_, field)) in schema.iter().enumerate() {
+            match (&self.0[i], field) {
+                (
+                    Value::Null,
+                    RecordField {
+                        nullable: true,
+                        field_type: _,
+                    },
+                ) => {}
+                (
+                    Value::Int(_),
+                    RecordField {
+                        field_type: RecordFieldType::Int,
+                        ..
+                    },
+                ) => {}
+                (
+                    Value::String(_),
+                    RecordField {
+                        field_type: RecordFieldType::String,
+                        ..
+                    },
+                ) => {}
+                (
+                    Value::Bytes(_),
+                    RecordField {
+                        field_type: RecordFieldType::Bytes,
+                        ..
+                    },
+                ) => {}
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Record field {} has incorrect type: {:?}, expected {:?}",
+                            &i, &self.0[i], &field.field_type
+                        ),
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn get_secondary_memtable_index_by_field<Field: Eq>(
+    sks: &Vec<Field>,
+    field: &Field,
+) -> Option<usize> {
+    sks.iter().position(|schema_field| schema_field == field)
 }
 
 /// A path to a log segment file along with its type
@@ -400,4 +489,289 @@ pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
     {
         std::os::windows::fs::symlink_file(original, link)
     }
+}
+
+/// Set the active segment to the segment with the given ordinal number.
+pub fn set_active_segment(data_dir_path: &Path, segment_num: u16) -> Result<(), io::Error> {
+    let tmp_uuid = Uuid::new_v4();
+    let tmp_filename = format!("active_{}", tmp_uuid.to_string());
+    let tmp_path = data_dir_path.join(tmp_filename);
+
+    let metadata_filename = format!("metadata.{}", segment_num);
+    let metadata_path = Path::new(&metadata_filename);
+    let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+
+    symlink(&metadata_path, &tmp_path)?;
+    fs::rename(&tmp_path, &active_symlink)?;
+
+    Ok(())
+}
+
+/// Create a new segment metadata file and return its number and path.
+/// A metadata file contains the segment metadata, including the UUID of the data file.
+/// See `ARCHITECTURE.md` for the file format.
+pub fn create_segment_metadata_file(
+    data_dir_path: &Path,
+    data_file_uuid: &Uuid,
+) -> Result<(u16, PathBuf), io::Error> {
+    let current_greatest_num = greatest_segment_number(data_dir_path)?;
+    let new_num = current_greatest_num + 1;
+
+    let metadata_filename = format!("metadata.{}", new_num);
+    let metadata_path = data_dir_path.join(metadata_filename);
+
+    let mut metadata_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&metadata_path)?;
+
+    let metadata_header = MetadataHeader {
+        version: 1,
+        uuid: *data_file_uuid,
+    };
+
+    metadata_file.write_all(&metadata_header.serialize())?;
+    metadata_file.flush()?;
+
+    let len = metadata_file.seek(io::SeekFrom::End(0))?;
+    assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
+    assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
+
+    Ok((new_num, metadata_path))
+}
+
+/// Get the number of the segment with the greatest ordinal.
+/// This is the newest segment, i.e. the one that is pointed to by the `active` symlink.
+/// If there are no segments yet, returns 0.
+pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
+    let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+
+    if !fs::exists(&active_symlink)? {
+        return Ok(0);
+    }
+
+    let segment_metadata_path = fs::read_link(&active_symlink)?;
+    let filename = segment_metadata_path
+        .file_name()
+        .expect("No filename in symlink")
+        .to_str()
+        .expect("Filename was not valid UTF-8");
+
+    // parse number from format "metadata.1"
+    let segment_number = filename
+        .split('.')
+        .last()
+        .expect("Filename did not have a number")
+        .parse::<u16>();
+
+    segment_number.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Failed to parse segment number from filename",
+        )
+    })
+}
+
+/// Create a new segment data file and return its UUID.
+/// A data file contains the segment data, tightly packed without separators.
+/// An accompanying metadata file is required to interpret the data.
+pub fn create_segment_data_file(data_dir_path: &Path) -> Result<(Uuid, PathBuf), io::Error> {
+    let uuid = Uuid::new_v4();
+    let new_segment_path = data_dir_path.join(uuid.to_string());
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&new_segment_path)?;
+
+    Ok((uuid, new_segment_path))
+}
+
+/// Reads the metadata header from the metadata file.
+/// Leaves the file seek head at the beginning of the records, after the header.
+pub fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHeader, io::Error> {
+    metadata_file.seek(SeekFrom::Start(0))?;
+    let mut buf = [0u8; METADATA_FILE_HEADER_SIZE];
+    metadata_file.read_exact(&mut buf)?;
+
+    let header = MetadataHeader::deserialize(&buf);
+    Ok(header)
+}
+
+pub fn validate_metadata_header(header: &MetadataHeader) -> Result<(), io::Error> {
+    if header.version != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unsupported metadata file version",
+        ));
+    }
+
+    Ok(())
+}
+
+pub enum IsMetadatafileValidResult {
+    Ok,
+    ReplaceFile,
+    TruncateToSize(u64),
+}
+
+pub fn is_metadata_file_valid(
+    metadata_file: &mut fs::File,
+) -> Result<IsMetadatafileValidResult, io::Error> {
+    let size = metadata_file.seek(SeekFrom::End(0))? as usize;
+
+    if size < METADATA_FILE_HEADER_SIZE {
+        return Ok(IsMetadatafileValidResult::ReplaceFile);
+    }
+
+    // The data section must be a multiple of 16 bytes.
+    // Otherwise, the non-aligned part of the file is dropped.
+    let data_section_len = size - METADATA_FILE_HEADER_SIZE;
+    let remainder = data_section_len % 16;
+    if remainder != 0 {
+        return Ok(IsMetadatafileValidResult::TruncateToSize(
+            (size - remainder) as u64,
+        ));
+    }
+
+    Ok(IsMetadatafileValidResult::Ok)
+}
+
+/// Check that the active metadata file is well-formed and repair it if necessary.
+/// The metadata file is considered well-formed if its size is, in pseudocode, `header_size + n * record_size`.
+/// If the file is not well-formed, it is truncated to the last well-formed record using
+/// a temporary file and an atomic move operation.
+///
+/// `self.active_metadata_file` must be a locked file handle opened with read permissions.
+/// The function leaves the seek head in an unspecified position.
+///
+/// Returns `false` if the file was repaired and rotated, `true` if no action was taken.
+pub fn ensure_active_metadata_is_valid(
+    data_dir: &Path,
+    metadata_file: &mut fs::File,
+) -> Result<bool, io::Error> {
+    let current_len = metadata_file.seek(SeekFrom::End(0))? as usize;
+
+    match is_metadata_file_valid(metadata_file)? {
+        IsMetadatafileValidResult::Ok => return Ok(true),
+        IsMetadatafileValidResult::ReplaceFile => {
+            let active_target = fs::read_link(data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
+            let active_path = data_dir.join(&active_target);
+            warn!(
+                "Metadata file \"{}\" is malformed ({} bytes), replacing it with an empty file",
+                active_target.display(),
+                current_len,
+            );
+            let mut tmp_file = tempfile::NamedTempFile::new()?;
+
+            let header = MetadataHeader {
+                version: 1,
+                uuid: Uuid::new_v4(),
+            };
+
+            tmp_file.write_all(&header.serialize())?;
+            tmp_file.flush()?;
+
+            fs::rename(tmp_file.path(), active_path)?;
+
+            debug!("Replaced metadata file");
+            return Ok(false);
+        }
+        IsMetadatafileValidResult::TruncateToSize(new_size) => {
+            let active_target = fs::read_link(data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
+            let active_path = data_dir.join(&active_target);
+            warn!(
+                "Metadata file \"{}\" is malformed ({} bytes), truncating it to {} bytes",
+                active_target.display(),
+                current_len,
+                new_size
+            );
+
+            let mut tmp_file = tempfile::NamedTempFile::new()?;
+
+            let mut buf = vec![0; new_size as usize];
+            metadata_file.seek(SeekFrom::Start(0))?;
+            metadata_file.read_exact(&mut buf)?;
+
+            tmp_file.write_all(&buf)?;
+            tmp_file.flush()?;
+
+            fs::rename(tmp_file.path(), active_path)?;
+
+            debug!("Truncated metadata file");
+            return Ok(false);
+        }
+    }
+}
+
+pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, io::Error> {
+    let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
+    let lock_request_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true) // When requesting a lock, we need to have either read or write permissions
+        .open(&lock_request_path)?;
+
+    // Attempt to acquire a shared lock on the lock request file
+    // If the file is already locked, return false
+    match lock_request_file.try_lock_shared() {
+        Err(e) => {
+            if e.kind() == lock_contended_error().kind() {
+                return Ok(true);
+            }
+            return Err(e);
+        }
+        Ok(_) => {
+            // Check that the exclusive lock request file is still the same as the one we opened
+            if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
+                // The lock request file has been removed
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Lock request file was removed unexpectedly",
+                ));
+            }
+
+            lock_request_file.unlock()?;
+            return Ok(false);
+        }
+    }
+}
+
+pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), io::Error> {
+    const SHARED_LOCK_WAIT_MAX_MS: u64 = 100;
+    let mut timeout = 5;
+    loop {
+        if is_exclusive_lock_requested(data_dir)? {
+            debug!(
+                "Exclusive lock requested, waiting for {}ms before requesting a shared lock again",
+                timeout
+            );
+            thread::sleep(std::time::Duration::from_millis(timeout));
+            timeout = std::cmp::min(timeout * 2, SHARED_LOCK_WAIT_MAX_MS);
+        } else {
+            file.lock_shared()?;
+            return Ok(());
+        }
+    }
+}
+
+pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), io::Error> {
+    // Create a lock on the exclusive lock request file to signal to readers that they should wait
+    let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
+    let lock_request_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true) // When requesting a lock, we need to have either read or write permissions
+        .open(&lock_request_path)?;
+
+    // Attempt to acquire an exclusive lock on the lock request file
+    // This will block until the lock is acquired
+    lock_request_file.lock_exclusive()?;
+
+    // Acquire an exclusive lock on the segment files
+    file.lock_exclusive()?;
+
+    // Unlock the request file
+    lock_request_file.unlock()?;
+
+    Ok(())
 }

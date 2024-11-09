@@ -110,58 +110,58 @@ impl Config {
 
 #[pyclass]
 #[derive(Clone)]
-struct RecordValue {
-    record_value: log_db::RecordValue,
+struct Value {
+    record_value: log_db::Value,
 }
 
 #[pymethods]
-impl RecordValue {
+impl Value {
     #[staticmethod]
     fn int(value: i64) -> Self {
-        RecordValue {
-            record_value: log_db::RecordValue::Int(value),
+        Value {
+            record_value: log_db::Value::Int(value),
         }
     }
 
     #[staticmethod]
     fn float(value: f64) -> Self {
-        RecordValue {
-            record_value: log_db::RecordValue::Float(value),
+        Value {
+            record_value: log_db::Value::Float(value),
         }
     }
 
     #[staticmethod]
     fn string(value: &str) -> Self {
-        RecordValue {
-            record_value: log_db::RecordValue::String(value.to_string()),
+        Value {
+            record_value: log_db::Value::String(value.to_string()),
         }
     }
 
     #[staticmethod]
     fn bytes(value: &[u8]) -> Self {
-        RecordValue {
-            record_value: log_db::RecordValue::Bytes(value.to_vec()),
+        Value {
+            record_value: log_db::Value::Bytes(value.to_vec()),
         }
     }
 
     #[staticmethod]
     fn null() -> Self {
-        RecordValue {
-            record_value: log_db::RecordValue::Null,
+        Value {
+            record_value: log_db::Value::Null,
         }
     }
 }
 
 #[pyclass]
 struct Record {
-    values: Vec<RecordValue>,
+    values: Vec<Value>,
 }
 
 #[pymethods]
 impl Record {
     #[new]
     #[pyo3(signature = (*py_args))]
-    fn new(py_args: Vec<RecordValue>) -> Self {
+    fn new(py_args: Vec<Value>) -> Self {
         Record { values: py_args }
     }
 }
@@ -210,7 +210,7 @@ fn log_db_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_class::<DB>()?;
     m.add_class::<RecordField>()?;
-    m.add_class::<RecordValue>()?;
+    m.add_class::<Value>()?;
     m.add_class::<Record>()?;
     Ok(())
 }

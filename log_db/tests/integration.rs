@@ -40,7 +40,7 @@ fn test_initialize_only() {
     let data_dir = tmp_dir();
     let _db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),
@@ -55,7 +55,7 @@ fn test_upsert_and_get_with_primary_memtable() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),
@@ -64,20 +64,18 @@ fn test_upsert_and_get_with_primary_memtable() {
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    let record = Record {
-        values: vec![
-            RecordValue::Int(1),
-            RecordValue::String("Alice".to_string()),
-            RecordValue::Bytes(vec![0, 1, 2]),
-        ],
-    };
+    let record = Record::from(&[
+        Value::Int(1),
+        Value::String("Alice".to_string()),
+        Value::Bytes(vec![0, 1, 2]),
+    ]);
     db.upsert(&record).unwrap();
 
-    let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
+    let result = db.get(&Value::Int(1)).unwrap().unwrap();
 
     // Check that the IDs match
-    assert!(match (&result.values[0], &record.values[0]) {
-        (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+    assert!(match (result.at(0), record.at(0)) {
+        (Value::Int(a), Value::Int(b)) => a == b,
         _ => false,
     });
 }
@@ -88,7 +86,7 @@ fn test_upsert_and_get_without_memtable() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .memtable_capacity(0)
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string().nullable()),
             (Field::Data, RecordField::bytes()),
@@ -98,65 +96,53 @@ fn test_upsert_and_get_without_memtable() {
         .expect("Failed to initialize DB instance");
 
     // Insert some records
-    let record0 = Record {
-        values: vec![
-            RecordValue::Int(0),
-            RecordValue::Null,
-            RecordValue::Bytes(vec![3, 4, 5]),
-        ],
-    };
+    let record0 = Record::from(&[Value::Int(0), Value::Null, Value::Bytes(vec![3, 4, 5])]);
     db.upsert(&record0).unwrap();
 
-    let record1 = Record {
-        values: vec![
-            RecordValue::Int(1),
-            RecordValue::String("Alice".to_string()),
-            RecordValue::Bytes(vec![0, 1, 2]),
-        ],
-    };
+    let record1 = Record::from(&[
+        Value::Int(1),
+        Value::String("Alice".to_string()),
+        Value::Bytes(vec![0, 1, 2]),
+    ]);
     db.upsert(&record1).unwrap();
 
-    let record2 = Record {
-        values: vec![
-            RecordValue::Int(1),
-            RecordValue::String("Bob".to_string()),
-            RecordValue::Bytes(vec![0, 1, 2]),
-        ],
-    };
+    let record2 = Record::from(&[
+        Value::Int(1),
+        Value::String("Bob".to_string()),
+        Value::Bytes(vec![0, 1, 2]),
+    ]);
     db.upsert(&record2).unwrap();
 
-    let record3 = Record {
-        values: vec![
-            RecordValue::Int(2),
-            RecordValue::String("George".to_string()),
-            RecordValue::Bytes(vec![]),
-        ],
-    };
+    let record3 = Record::from(&[
+        Value::Int(2),
+        Value::String("George".to_string()),
+        Value::Bytes(vec![]),
+    ]);
     db.upsert(&record3).unwrap();
 
     // Get with ID = 0
-    let result = db.get(&RecordValue::Int(0)).unwrap().unwrap();
+    let result = db.get(&Value::Int(0)).unwrap().unwrap();
 
     // Should match record0
-    assert!(match (&result.values[0], &record0.values[0]) {
-        (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+    assert!(match (result.at(0), record0.at(0)) {
+        (Value::Int(a), Value::Int(b)) => a == b,
         _ => false,
     });
-    assert!(match (&result.values[1], &record0.values[1]) {
-        (RecordValue::Null, RecordValue::Null) => true,
+    assert!(match (result.at(1), record0.at(1)) {
+        (Value::Null, Value::Null) => true,
         _ => false,
     });
 
     // Get with ID = 1
-    let result = db.get(&RecordValue::Int(1)).unwrap().unwrap();
+    let result = db.get(&Value::Int(1)).unwrap().unwrap();
 
     // Should match record2
-    assert!(match (&result.values[0], &record2.values[0]) {
-        (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+    assert!(match (result.at(0), record2.at(0)) {
+        (Value::Int(a), Value::Int(b)) => a == b,
         _ => false,
     });
-    assert!(match (&result.values[1], &record2.values[1]) {
-        (RecordValue::String(a), RecordValue::String(b)) => a == b,
+    assert!(match (result.at(1), record2.at(1)) {
+        (Value::String(a), Value::String(b)) => a == b,
         _ => false,
     });
 }
@@ -166,15 +152,13 @@ fn test_upsert_fails_on_null_in_non_nullable_field() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![(Field::Id, RecordField::int())])
+        .fields(&[(Field::Id, RecordField::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    let record = Record {
-        // Null value
-        values: vec![RecordValue::Null],
-    };
+    // Null value
+    let record = Record::from(&[Value::Null]);
     assert!(db.upsert(&record).is_err());
 }
 
@@ -183,7 +167,7 @@ fn test_upsert_fails_on_invalid_number_of_values() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),
@@ -192,13 +176,11 @@ fn test_upsert_fails_on_invalid_number_of_values() {
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    let record = Record {
-        // Missing primary key
-        values: vec![
-            RecordValue::String("Alice".to_string()),
-            RecordValue::Bytes(vec![0, 1, 2]),
-        ],
-    };
+    // Missing primary key
+    let record = Record::from(&[
+        Value::String("Alice".to_string()),
+        Value::Bytes(vec![0, 1, 2]),
+    ]);
     assert!(db.upsert(&record).is_err());
 }
 
@@ -207,7 +189,7 @@ fn test_upsert_fails_on_invalid_value_type() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),
@@ -216,13 +198,11 @@ fn test_upsert_fails_on_invalid_value_type() {
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    let record = Record {
-        values: vec![
-            RecordValue::String("foo".to_string()),
-            RecordValue::String("bar".to_string()),
-            RecordValue::String("baz".to_string()),
-        ],
-    };
+    let record = Record::from(&[
+        Value::String("foo".to_string()),
+        Value::String("bar".to_string()),
+        Value::String("baz".to_string()),
+    ]);
     assert!(db.upsert(&record).is_err());
 }
 
@@ -232,7 +212,7 @@ fn test_upsert_and_get_from_secondary_memtable() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string()),
             (Field::Data, RecordField::bytes()),
@@ -243,31 +223,25 @@ fn test_upsert_and_get_from_secondary_memtable() {
         .expect("Failed to initialize DB instance");
 
     // Insert some records
-    let record0 = Record {
-        values: vec![
-            RecordValue::Int(0),
-            RecordValue::String("John".to_string()),
-            RecordValue::Bytes(vec![3, 4, 5]),
-        ],
-    };
+    let record0 = Record::from(&[
+        Value::Int(0),
+        Value::String("John".to_string()),
+        Value::Bytes(vec![3, 4, 5]),
+    ]);
     db.upsert(&record0).unwrap();
 
-    let record1 = Record {
-        values: vec![
-            RecordValue::Int(1),
-            RecordValue::String("John".to_string()),
-            RecordValue::Bytes(vec![1, 2, 3]),
-        ],
-    };
+    let record1 = Record::from(&[
+        Value::Int(1),
+        Value::String("John".to_string()),
+        Value::Bytes(vec![1, 2, 3]),
+    ]);
     db.upsert(&record1).unwrap();
 
-    let record2 = Record {
-        values: vec![
-            RecordValue::Int(2),
-            RecordValue::String("George".to_string()),
-            RecordValue::Bytes(vec![1, 2, 3]),
-        ],
-    };
+    let record2 = Record::from(&[
+        Value::Int(2),
+        Value::String("George".to_string()),
+        Value::Bytes(vec![1, 2, 3]),
+    ]);
     db.upsert(&record2).unwrap();
 
     // Delete the DB so that any results must come from a memtable
@@ -276,7 +250,7 @@ fn test_upsert_and_get_from_secondary_memtable() {
 
     // There should be 2 Johns
     let johns = db
-        .find_all(&Field::Name, &RecordValue::String("John".to_string()))
+        .find_all(&Field::Name, &Value::String("John".to_string()))
         .expect("Failed to find all Johns");
 
     assert_eq!(johns.len(), 2);
@@ -294,14 +268,12 @@ fn test_multiple_writing_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(vec![(Field::Id, RecordField::int())])
+                .fields(&[(Field::Id, RecordField::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
 
-            let record = Record {
-                values: vec![RecordValue::Int(i)],
-            };
+            let record = Record::from(&[Value::Int(i)]);
             db.upsert(&record).expect("Failed to upsert record");
         }));
     }
@@ -313,19 +285,19 @@ fn test_multiple_writing_threads() {
     // Read the records
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(vec![(Field::Id, RecordField::int())])
+        .fields(&[(Field::Id, RecordField::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
     for i in 0..threads_n {
         let result = db
-            .get(&RecordValue::Int(i))
+            .get(&Value::Int(i))
             .expect("Failed to get record")
             .expect("Record not found");
-        let expected = RecordValue::Int(i);
-        assert!(match (&result.values[0], &expected) {
-            (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+
+        assert!(match &result.values() {
+            [Value::Int(a)] => a == &i,
             _ => false,
         });
     }
@@ -343,14 +315,14 @@ fn test_one_writer_and_multiple_reading_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(vec![(Field::Id, RecordField::int())])
+                .fields(&[(Field::Id, RecordField::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
 
             let mut timeout = 5;
             loop {
-                let result = db.get(&RecordValue::Int(i)).expect("Failed to get record");
+                let result = db.get(&Value::Int(i)).expect("Failed to get record");
                 match result {
                     None => {
                         thread::sleep(Duration::from_millis(timeout));
@@ -358,9 +330,8 @@ fn test_one_writer_and_multiple_reading_threads() {
                         continue;
                     }
                     Some(result) => {
-                        let expected = RecordValue::Int(i);
-                        assert!(match (&result.values[0], &expected) {
-                            (RecordValue::Int(a), RecordValue::Int(b)) => a == b,
+                        assert!(match &result.values() {
+                            [Value::Int(a)] => a == &i,
                             _ => false,
                         });
                         break;
@@ -374,15 +345,13 @@ fn test_one_writer_and_multiple_reading_threads() {
     threads.push(thread::spawn(move || {
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(vec![(Field::Id, RecordField::int())])
+            .fields(&[(Field::Id, RecordField::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB instance");
 
         for i in 0..threads_n {
-            let record = Record {
-                values: vec![RecordValue::Int(i)],
-            };
+            let record = Record::from(&[Value::Int(i)]);
             db.upsert(&record).expect("Failed to upsert record");
         }
     }));
@@ -397,16 +366,14 @@ fn test_log_is_rotated_when_capacity_reached() {
     let data_dir = tmp_dir();
     let data_dir_path = Path::new(&data_dir);
 
-    let record = Record {
-        values: vec![RecordValue::Int(1), RecordValue::Bytes(vec![1, 2, 3, 4])],
-    };
+    let record = Record::from(&[Value::Int(1), Value::Bytes(vec![1, 2, 3, 4])]);
     let record_len = &record.serialize().len();
 
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .memtable_capacity(0) // disable memtables
         .segment_size(10 * record_len) // small log segment size
-        .fields(vec![
+        .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Data, RecordField::bytes()),
         ])
