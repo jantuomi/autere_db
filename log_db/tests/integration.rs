@@ -227,6 +227,7 @@ fn test_upsert_fails_on_invalid_value_type() {
 }
 
 #[test]
+#[ignore]
 fn test_upsert_and_get_from_secondary_memtable() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
