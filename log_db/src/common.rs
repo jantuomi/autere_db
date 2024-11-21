@@ -1,11 +1,10 @@
 use fs2::{lock_contended_error, FileExt};
 use once_cell::sync::Lazy;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::{self, metadata, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 use std::thread;
 use uuid::Uuid;
@@ -42,10 +41,6 @@ impl LogKey {
     pub fn new(segment_num: u16, index: u64) -> Self {
         assert!(index < (1 << 48), "Index must fit in 48 bits");
         LogKey((segment_num as u64) << 48 | index)
-    }
-
-    pub fn from(u: u64) -> Self {
-        LogKey(u)
     }
 
     pub fn segment_num(&self) -> u16 {
@@ -201,22 +196,6 @@ pub enum WriteDurability {
     FlushSync,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum ReadConsistency {
-    /// Reads are **not** guaranteed to see the latest writes.
-    /// Indexes are only updated when running maintenance tasks.
-    /// This is the fastest option, but can produce stale reads.
-    Eventual,
-    /// Reads are guaranteed to see the latest writes from the same client, but
-    /// not from other clients. Written values are indexed after writing to file.
-    /// Indexes are updated when running maintenance tasks.
-    ReadMyWrites,
-    /// Reads are guaranteed to see the latest writes.
-    /// Indexes are updated synchronously before reads.
-    /// This is the slowest option, and can cause long waits for reads.
-    Strong,
-}
-
 impl Display for WriteDurability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(f, "{:?}", self)?;
@@ -288,20 +267,6 @@ pub enum Value {
     String(String),
     Bytes(Vec<u8>),
 }
-
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
-            (Value::Bytes(a), Value::Bytes(b)) => a == b,
-            (Value::Null, Value::Null) => true,
-            _ => false,
-        }
-    }
-}
-impl Eq for Value {}
 
 impl Value {
     pub fn serialize(&self) -> Vec<u8> {
@@ -491,30 +456,6 @@ pub fn get_secondary_memtable_index_by_field<Field: Eq>(
     sks.iter().position(|schema_field| schema_field == field)
 }
 
-pub struct GetSecondaryIndexPositionsResult {
-    pub schema_index: usize,
-    pub secondary_index: usize,
-}
-
-pub fn get_secondary_index_positions<Field: Eq>(
-    sks: &Vec<Field>,
-    schema: &Vec<(Field, RecordField)>,
-) -> Vec<GetSecondaryIndexPositionsResult> {
-    let mut ret = vec![];
-    for (i, (schema_field, _)) in schema.iter().enumerate() {
-        for (j, sk) in sks.iter().enumerate() {
-            if schema_field == sk {
-                ret.push(GetSecondaryIndexPositionsResult {
-                    schema_index: i,
-                    secondary_index: j,
-                });
-                break;
-            }
-        }
-    }
-    ret
-}
-
 /// A path to a log segment file along with its type
 pub enum SegmentPath {
     /// A symbolic link to the active log file
@@ -598,8 +539,7 @@ pub fn create_segment_metadata_file(
         uuid: *data_file_uuid,
     };
 
-    let header_serialized = metadata_header.serialize();
-    metadata_file.write_all(&header_serialized)?;
+    metadata_file.write_all(&metadata_header.serialize())?;
     metadata_file.flush()?;
 
     let len = metadata_file.seek(io::SeekFrom::End(0))?;
@@ -607,19 +547,6 @@ pub fn create_segment_metadata_file(
     assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
 
     Ok((new_num, metadata_path))
-}
-
-/// Parse number from format "metadata.1"
-pub fn parse_segment_num(segment_filename: &Path) -> Result<u16, ParseIntError> {
-    segment_filename
-        .file_name()
-        .expect("Not a valid path")
-        .to_str()
-        .expect("Not a valid UTF-8 string")
-        .split(".")
-        .last()
-        .expect("No extension")
-        .parse::<u16>()
 }
 
 /// Get the number of the segment with the greatest ordinal.
@@ -633,8 +560,20 @@ pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
     }
 
     let segment_metadata_path = fs::read_link(&active_symlink)?;
+    let filename = segment_metadata_path
+        .file_name()
+        .expect("No filename in symlink")
+        .to_str()
+        .expect("Filename was not valid UTF-8");
 
-    parse_segment_num(&segment_metadata_path).map_err(|_| {
+    // parse number from format "metadata.1"
+    let segment_number = filename
+        .split('.')
+        .last()
+        .expect("Filename did not have a number")
+        .parse::<u16>();
+
+    segment_number.map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "Failed to parse segment number from filename",
@@ -843,92 +782,4 @@ pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> Result<()
     lock_request_file.unlock()?;
 
     Ok(())
-}
-
-pub fn get_record_by_log_key(data_dir: &Path, log_key: &LogKey) -> Result<Record, io::Error> {
-    let segment_num = log_key.segment_num();
-    let segment_index = log_key.index();
-
-    let metadata_path = data_dir.join(format!("metadata.{}", segment_num));
-    let mut metadata_file = READ_MODE.open(metadata_path)?;
-
-    request_shared_lock(data_dir, &mut metadata_file)?;
-
-    let metadata_header = read_metadata_header(&mut metadata_file)?;
-    validate_metadata_header(&metadata_header)?;
-
-    let data_file_path = data_dir.join(metadata_header.uuid.to_string());
-    let mut data_file = READ_MODE.open(data_file_path)?;
-
-    request_shared_lock(data_dir, &mut data_file)?;
-
-    let metadata_offset = METADATA_FILE_HEADER_SIZE as u64 + segment_index * 16;
-    let mut metadata_buf = vec![0; 16];
-    metadata_file.seek(SeekFrom::Start(metadata_offset))?;
-    metadata_file.read_exact(&mut metadata_buf)?;
-
-    let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
-    let data_len = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
-
-    let mut data_buf = vec![0; data_len as usize];
-    data_file.seek(SeekFrom::Start(data_offset))?;
-    data_file.read_exact(&mut data_buf)?;
-
-    let record = Record::deserialize(&data_buf);
-
-    Ok(record)
-}
-
-pub fn get_records_by_log_keys(
-    data_dir: &Path,
-    log_keys: &[LogKey],
-) -> Result<Vec<Record>, io::Error> {
-    // Partition by segment number
-    let mut segments: BTreeMap<u16, Vec<u64>> = BTreeMap::new();
-    for log_key in log_keys {
-        segments
-            .entry(log_key.segment_num())
-            .or_default()
-            .push(log_key.index());
-    }
-
-    let mut records = Vec::new();
-
-    // Process newest (largest segment num) first
-    let mut segments_sorted = segments.iter().collect::<Vec<_>>();
-    segments_sorted.sort_by_key(|(&segment_num, _)| -(segment_num as i32));
-
-    for (segment_num, indices) in segments_sorted {
-        let metadata_path = data_dir.join(format!("metadata.{}", segment_num));
-        let mut metadata_file = READ_MODE.open(metadata_path)?;
-
-        request_shared_lock(data_dir, &mut metadata_file)?;
-
-        let metadata_header = read_metadata_header(&mut metadata_file)?;
-        validate_metadata_header(&metadata_header)?;
-
-        let data_file_path = data_dir.join(metadata_header.uuid.to_string());
-        let mut data_file = READ_MODE.open(data_file_path)?;
-
-        request_shared_lock(data_dir, &mut data_file)?;
-
-        for index in indices {
-            let metadata_offset = METADATA_FILE_HEADER_SIZE as u64 + index * 16;
-            let mut metadata_buf = vec![0; 16];
-            metadata_file.seek(SeekFrom::Start(metadata_offset))?;
-            metadata_file.read_exact(&mut metadata_buf)?;
-
-            let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
-            let data_len = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
-
-            let mut data_buf = vec![0; data_len as usize];
-            data_file.seek(SeekFrom::Start(data_offset))?;
-            data_file.read_exact(&mut data_buf)?;
-
-            let record = Record::deserialize(&data_buf);
-            records.push(record);
-        }
-    }
-
-    Ok(records)
 }

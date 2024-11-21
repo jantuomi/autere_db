@@ -21,29 +21,7 @@ impl<'a> ForwardLogReader {
         ret
     }
 
-    pub fn new_with_index(
-        metadata_file: fs::File,
-        data_file: fs::File,
-        index: u64,
-    ) -> ForwardLogReader {
-        let mut ret = ForwardLogReader {
-            metadata_reader: io::BufReader::new(metadata_file),
-            data_reader: io::BufReader::new(data_file),
-        };
-
-        ret.metadata_reader
-            .seek(io::SeekFrom::Start(
-                METADATA_FILE_HEADER_SIZE as u64 + 16 * index,
-            ))
-            .expect("Seek failed");
-
-        ret
-    }
-
-    fn read_record(&mut self) -> Result<Option<ForwardLogReaderItem>, io::Error> {
-        let metadata_index =
-            (self.metadata_reader.stream_position()? - METADATA_FILE_HEADER_SIZE as u64) / 16;
-
+    fn read_record(&mut self) -> Result<Option<Record>, io::Error> {
         let mut metadata_entry_buf = vec![0; 16]; // 2x u64
         if let Err(e) = self.metadata_reader.read_exact(&mut metadata_entry_buf) {
             if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -54,37 +32,24 @@ impl<'a> ForwardLogReader {
         }
 
         // First u64 is the offset of the record in the data file, second is the length of the record
-        let data_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
-        let data_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
+        let entry_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
+        let entry_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
 
         // Use .seek_relative instead of .seek to avoid dropping the BufReader internal buffer when
         // the seek distance is small
-        let seek_distance = data_offset - self.data_reader.stream_position()?;
+        let seek_distance = entry_offset - self.data_reader.stream_position()?;
         self.data_reader.seek_relative(seek_distance as i64)?;
 
-        let mut result_buf = vec![0; data_length as usize];
+        let mut result_buf = vec![0; entry_length as usize];
         self.data_reader.read_exact(&mut result_buf)?;
 
         let record = Record::deserialize(&result_buf);
-        let item = ForwardLogReaderItem {
-            metadata_index,
-            data_offset,
-            data_length,
-            record,
-        };
-        Ok(Some(item))
+        Ok(Some(record))
     }
 }
 
-pub struct ForwardLogReaderItem {
-    pub metadata_index: u64,
-    pub data_offset: u64,
-    pub data_length: u64,
-    pub record: Record,
-}
-
 impl Iterator for ForwardLogReader {
-    type Item = ForwardLogReaderItem;
+    type Item = Record;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.read_record() {
@@ -118,10 +83,10 @@ mod tests {
 
         // There are two records in the log with "schema" with one field: Bytes
 
-        let first_item = forward_log_reader
+        let first_record = forward_log_reader
             .next()
             .expect("Failed to read the first record");
-        assert!(match first_item.record.values() {
+        assert!(match first_record.values() {
             [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });
