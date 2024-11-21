@@ -26,7 +26,6 @@ use uuid::Uuid;
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
-    memtable_capacity: Option<usize>,
     fields: Option<Vec<(Field, RecordField)>>,
     primary_key: Option<Field>,
     secondary_keys: Option<Vec<Field>>,
@@ -38,7 +37,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         ConfigBuilder::<Field> {
             data_dir: None,
             segment_size: None,
-            memtable_capacity: None,
             fields: None,
             primary_key: None,
             secondary_keys: None,
@@ -58,13 +56,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
     /// the segment file may continue to grow.
     pub fn segment_size(&mut self, segment_size: usize) -> &mut Self {
         self.segment_size = Some(segment_size);
-        self
-    }
-
-    /// The maximum size of a single memtable in terms of records.
-    /// Note that each secondary index will have its own memtable.
-    pub fn memtable_capacity(&mut self, memtable_capacity: usize) -> &mut Self {
-        self.memtable_capacity = Some(memtable_capacity);
         self
     }
 
@@ -101,7 +92,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         let config = Config::<Field> {
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
             segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
-            memtable_capacity: self.memtable_capacity.unwrap_or(1_000_000),
             fields: self
                 .fields
                 .as_ref()
@@ -129,7 +119,6 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
 struct Config<Field: Eq + Clone> {
     pub data_dir: String,
     pub segment_size: usize,
-    pub memtable_capacity: usize,
     pub fields: Vec<(Field, RecordField)>,
     pub primary_key: Field,
     pub secondary_keys: Vec<Field>,
@@ -815,7 +804,6 @@ mod tests {
 
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .memtable_capacity(0)
             .fields(&[(Field::Id, RecordField::int())])
             .primary_key(Field::Id)
             .initialize()

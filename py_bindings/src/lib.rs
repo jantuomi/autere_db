@@ -60,8 +60,6 @@ struct Config {
     #[pyo3(get, set)]
     segment_size: Option<usize>,
     #[pyo3(get, set)]
-    memtable_capacity: Option<usize>,
-    #[pyo3(get, set)]
     fields: Option<Vec<(Field, RecordField)>>,
     #[pyo3(get, set)]
     primary_key: Option<Field>,
@@ -80,9 +78,6 @@ impl Config {
         }
         if self.segment_size.is_some() {
             config.segment_size(self.segment_size.unwrap());
-        }
-        if self.memtable_capacity.is_some() {
-            config.memtable_capacity(self.memtable_capacity.unwrap());
         }
         if self.fields.is_some() {
             let mut fields = Vec::new();
@@ -191,7 +186,6 @@ impl DB {
         Config {
             data_dir: None,
             segment_size: None,
-            memtable_capacity: None,
             fields: None,
             primary_key: None,
             secondary_keys: None,

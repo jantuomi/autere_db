@@ -85,7 +85,6 @@ fn test_upsert_and_get_without_memtable() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .memtable_capacity(0)
         .fields(&[
             (Field::Id, RecordField::int()),
             (Field::Name, RecordField::string().nullable()),
@@ -371,7 +370,6 @@ fn test_log_is_rotated_when_capacity_reached() {
 
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .memtable_capacity(0) // disable memtables
         .segment_size(10 * record_len) // small log segment size
         .fields(&[
             (Field::Id, RecordField::int()),

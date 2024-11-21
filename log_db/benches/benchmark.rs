@@ -128,7 +128,6 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .memtable_capacity(0)
             .fields(vec![
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
@@ -159,7 +158,6 @@ pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .memtable_capacity(0)
             .fields(vec![
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
@@ -180,55 +178,6 @@ pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
     }
 }
 
-pub fn get_various_memtable_capacities(c: &mut Criterion) {
-    let mut group = c.benchmark_group("get_various_memtable_capacities");
-
-    const PREFILL_N: usize = 10000;
-    let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-    let data_dir = &data_dir_obj
-        .path()
-        .to_str()
-        .expect("Failed to convert tmpdir path to str");
-
-    // Create a db instance for prefilling
-    let mut db = DB::configure()
-        .data_dir(&data_dir)
-        .fields(vec![
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
-        ])
-        .primary_key(Field::Id)
-        .initialize()
-        .expect("Failed to initialize DB");
-
-    prefill_db(&mut db, PREFILL_N, false).expect("Failed to prefill DB");
-    drop(db);
-
-    // prefill_db generates IDs between 0..1000, so having memtable_capacity = 1000
-    // effectively indexes the whole DB
-    for size in (0..).map(|x| x * 100).take_while(|&x| x <= 1000) {
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
-            let mut db = DB::configure()
-                .data_dir(&data_dir)
-                .fields(vec![
-                    (Field::Id, RecordField::int()),
-                    (Field::Name, RecordField::string()),
-                    (Field::Data, RecordField::bytes()),
-                ])
-                .memtable_capacity(size)
-                .primary_key(Field::Id)
-                .initialize()
-                .expect("Failed to initialize DB");
-
-            b.iter(|| {
-                let id = random_int(0, 1000 + 1);
-                let _ = db.get(black_box(&Value::Int(id)));
-            });
-        });
-    }
-}
-
 // Register the benchmark group
 criterion_group!(
     benches,
@@ -237,6 +186,5 @@ criterion_group!(
     upsert_write_durability,
     get_from_disk_various_initial_sizes,
     get_from_disk_various_initial_sizes_compacted,
-    get_various_memtable_capacities,
 );
 criterion_main!(benches);
