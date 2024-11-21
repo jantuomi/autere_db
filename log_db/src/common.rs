@@ -476,6 +476,14 @@ impl Record {
     }
 }
 
+/// A trait that describes how to convert a data structure into a database `Record` and vice versa.
+pub trait Recordable {
+    /// Convert the data structure implementing the `Recordable` trait into a database `Record`.
+    fn to_record(&self) -> Record;
+    /// Convert a database `Record` into the data structure implementing the `Recordable` trait.
+    fn from_record(record: &Record) -> Self;
+}
+
 pub fn get_secondary_memtable_index_by_field<Field: Eq>(
     sks: &Vec<Field>,
     field: &Field,
