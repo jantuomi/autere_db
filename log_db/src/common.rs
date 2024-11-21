@@ -542,11 +542,7 @@ pub fn create_segment_metadata_file(
     let metadata_filename = format!("metadata.{}", new_num);
     let metadata_path = data_dir_path.join(metadata_filename);
 
-    let mut metadata_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open(&metadata_path)?;
+    let mut metadata_file = APPEND_MODE.clone().create(true).open(&metadata_path)?;
 
     let metadata_header = MetadataHeader {
         version: 1,

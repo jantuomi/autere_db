@@ -37,8 +37,8 @@ impl<'a> ForwardLogReader {
 
         // Use .seek_relative instead of .seek to avoid dropping the BufReader internal buffer when
         // the seek distance is small
-        let seek_distance = entry_offset - self.data_reader.stream_position()?;
-        self.data_reader.seek_relative(seek_distance as i64)?;
+        let seek_distance = entry_offset as i64 - self.data_reader.stream_position()? as i64;
+        self.data_reader.seek_relative(seek_distance)?;
 
         let mut result_buf = vec![0; entry_length as usize];
         self.data_reader.read_exact(&mut result_buf)?;
