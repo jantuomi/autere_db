@@ -89,7 +89,7 @@ impl Config {
             for (field, record_field) in self.fields.as_ref().unwrap() {
                 fields.push((field.to_string(), record_field.record_field.clone()));
             }
-            config.fields(fields);
+            config.fields(&fields);
         }
         if self.primary_key.is_some() {
             config.primary_key(self.primary_key.as_ref().unwrap().to_string());
@@ -174,14 +174,14 @@ struct DB {
 #[pymethods]
 impl DB {
     fn upsert(&mut self, record: &Record) -> PyResult<()> {
-        let values = record
+        let values: Vec<log_db::Value> = record
             .values
             .iter()
             .map(|v| v.record_value.clone())
             .collect();
 
         self.db
-            .upsert(&log_db::Record { values })
+            .upsert(&log_db::Record::from(&values))
             .map_err(|e| PyException::new_err(e))?;
         Ok(())
     }
