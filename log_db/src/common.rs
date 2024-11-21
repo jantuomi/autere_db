@@ -268,6 +268,20 @@ pub enum Value {
     Bytes(Vec<u8>),
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            _ => false,
+        }
+    }
+}
+impl Eq for Value {}
+
 impl Value {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
