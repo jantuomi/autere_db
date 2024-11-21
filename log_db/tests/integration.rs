@@ -321,6 +321,8 @@ fn test_one_writer_and_multiple_reading_threads() {
 
             let mut timeout = 5;
             loop {
+                db.do_maintenance_tasks() // Run maintenance tasks on every read, just to test it
+                    .expect("Failed to do maintenance tasks");
                 let result = db.get(&Value::Int(i)).expect("Failed to get record");
                 match result {
                     None => {
