@@ -9,7 +9,7 @@ pub struct PrimaryMemtable {
     ///
     /// Note: it must be invariant that all memtables (primary and secondary)
     /// contain the same keys.
-    records: BTreeMap<IndexableValue, Record>,
+    records: BTreeMap<IndexableValue, LogKey>,
 }
 
 impl PrimaryMemtable {
@@ -19,15 +19,11 @@ impl PrimaryMemtable {
         }
     }
 
-    pub fn set(&mut self, key: &IndexableValue, value: &Record) {
+    pub fn set(&mut self, key: &IndexableValue, value: &LogKey) {
         self.records.insert(key.clone(), value.clone());
     }
 
-    pub fn get(&mut self, key: &IndexableValue) -> Option<&Record> {
-        self.records.get(key)
-    }
-
-    pub fn get_without_update(&self, key: &IndexableValue) -> Option<&Record> {
+    pub fn get(&self, key: &IndexableValue) -> Option<&LogKey> {
         self.records.get(key)
     }
 }

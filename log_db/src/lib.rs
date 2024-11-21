@@ -16,9 +16,7 @@ use memtable_secondary::SecondaryMemtable;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
-use std::io::Seek;
-use std::io::SeekFrom;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -362,9 +360,41 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Looking up key {:?} in primary memtable", query_key);
         let found = self.primary_memtable.get(&query_key);
-        if let Some(record) = found {
-            debug!("Found record in primary memtable: {:?}", record);
-            return Ok(Some(record.clone()));
+        if let Some(log_key) = found {
+            debug!("Found log_key in primary memtable: {:?}", log_key);
+            let segment_num = log_key.segment_num();
+            let segment_index = log_key.index();
+
+            let metadata_path = &self.data_dir.join(format!("metadata.{}", segment_num));
+            let mut metadata_file = READ_MODE.open(&metadata_path)?;
+
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
+
+            let metadata_header = read_metadata_header(&mut metadata_file)?;
+
+            metadata_file.seek_relative(segment_index as i64 * 16)?;
+
+            let mut metadata_buf = [0; 2 * 8];
+            metadata_file.read_exact(&mut metadata_buf)?;
+
+            metadata_file.unlock()?;
+
+            let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
+            let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
+
+            let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
+            let mut data_file = READ_MODE.open(&data_path)?;
+
+            request_shared_lock(&self.data_dir, &mut data_file)?;
+
+            data_file.seek(SeekFrom::Start(data_offset))?;
+
+            let mut data_buf = vec![0; data_length as usize];
+            data_file.read_exact(&mut data_buf)?;
+
+            let record = Record::deserialize(&data_buf);
+
+            return Ok(Some(record));
         }
 
         debug!(
@@ -471,10 +501,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 "Found suitable secondary index. Looking up key {:?} in the memtable",
                 query_key
             );
-            let records = self.secondary_memtables[memtable_index]
-                .find_all(&self.primary_memtable, &query_key);
-            debug!("Found matching key");
-            return Ok(records.iter().map(|record| record.clone()).collect());
+
+            // TODO: Implement secondary memtable search
         }
 
         debug!(
@@ -543,19 +571,6 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             "Number of matching records found in log file: {}",
             found_records.len()
         );
-
-        if let Some(memtable_index) = found_memtable_index {
-            debug!("Inserting result set into secondary index");
-            let primary_values: Vec<IndexableValue> = found_records
-                .iter()
-                .map(|r| {
-                    r.at(self.primary_key_index)
-                        .as_indexable()
-                        .expect("A non-indexable value was stored at primary key index")
-                })
-                .collect();
-            self.secondary_memtables[memtable_index].set_all(&query_key, &primary_values);
-        }
 
         Ok(found_records)
     }
