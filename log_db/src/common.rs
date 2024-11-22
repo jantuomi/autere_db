@@ -29,13 +29,6 @@ pub fn metadata_filename(num: u16) -> String {
     format!("metadata.{}", num)
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum SpecialSequence {
-    RecordSeparator,
-    LiteralFieldSeparator,
-    LiteralEscape,
-}
-
 /// LogKey is a packed struct that contains:
 /// - a log segment number (16 bits)
 /// - a log index within the segment (48 bits)
@@ -192,6 +185,16 @@ impl MetadataHeader {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ReadConsistency {
+    /// Reads by client A are guaranteed to see writes by themselves and any writes by other clients B
+    /// that were done before last index refresh.
+    Eventual,
+    /// Reads by client A are guaranteed to see all writes. This is slower: all reads must first
+    /// refresh indexes.
+    Strong,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WriteDurability {
     /// Changes are written to the OS write buffer but not immediately synced to disk.
     /// This is generally recommended. Most OSes will sync the write buffer to disk within a few seconds.
@@ -214,45 +217,47 @@ pub enum IndexableValue {
     String(String),
 }
 
+/// A primitive type
 #[derive(Debug, Clone)]
-pub enum RecordFieldType {
+pub enum PrimValueType {
     Int,
     Float,
     String,
     Bytes,
 }
 
+/// A primitive type + a nullability bit
 #[derive(Debug, Clone)]
-pub struct RecordField {
-    pub field_type: RecordFieldType,
+pub struct ValueType {
+    pub prim_value_type: PrimValueType,
     pub nullable: bool,
 }
 
-impl RecordField {
+impl ValueType {
     pub fn int() -> Self {
-        RecordField {
-            field_type: RecordFieldType::Int,
+        ValueType {
+            prim_value_type: PrimValueType::Int,
             nullable: false,
         }
     }
 
     pub fn float() -> Self {
-        RecordField {
-            field_type: RecordFieldType::Float,
+        ValueType {
+            prim_value_type: PrimValueType::Float,
             nullable: false,
         }
     }
 
     pub fn string() -> Self {
-        RecordField {
-            field_type: RecordFieldType::String,
+        ValueType {
+            prim_value_type: PrimValueType::String,
             nullable: false,
         }
     }
 
     pub fn bytes() -> Self {
-        RecordField {
-            field_type: RecordFieldType::Bytes,
+        ValueType {
+            prim_value_type: PrimValueType::Bytes,
             nullable: false,
         }
     }
@@ -401,7 +406,7 @@ impl Record {
         &self.0[index]
     }
 
-    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, RecordField)>) -> Result<(), io::Error> {
+    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> Result<(), io::Error> {
         // Validate the record length
         if self.0.len() != schema.len() {
             return Err(io::Error::new(
@@ -419,29 +424,29 @@ impl Record {
             match (&self.0[i], field) {
                 (
                     Value::Null,
-                    RecordField {
+                    ValueType {
                         nullable: true,
-                        field_type: _,
+                        prim_value_type: _,
                     },
                 ) => {}
                 (
                     Value::Int(_),
-                    RecordField {
-                        field_type: RecordFieldType::Int,
+                    ValueType {
+                        prim_value_type: PrimValueType::Int,
                         ..
                     },
                 ) => {}
                 (
                     Value::String(_),
-                    RecordField {
-                        field_type: RecordFieldType::String,
+                    ValueType {
+                        prim_value_type: PrimValueType::String,
                         ..
                     },
                 ) => {}
                 (
                     Value::Bytes(_),
-                    RecordField {
-                        field_type: RecordFieldType::Bytes,
+                    ValueType {
+                        prim_value_type: PrimValueType::Bytes,
                         ..
                     },
                 ) => {}
@@ -450,13 +455,48 @@ impl Record {
                         io::ErrorKind::InvalidInput,
                         format!(
                             "Record field {} has incorrect type: {:?}, expected {:?}",
-                            &i, &self.0[i], &field.field_type
+                            &i, &self.0[i], &field.prim_value_type
                         ),
                     ))
                 }
             }
         }
         Ok(())
+    }
+}
+
+pub fn type_check(value: &Value, value_type: &ValueType) -> bool {
+    match (value, value_type) {
+        (
+            Value::Int(_),
+            ValueType {
+                prim_value_type: PrimValueType::Int,
+                ..
+            },
+        ) => true,
+        (
+            Value::Float(_),
+            ValueType {
+                prim_value_type: PrimValueType::Float,
+                ..
+            },
+        ) => true,
+        (
+            Value::Bytes(_),
+            ValueType {
+                prim_value_type: PrimValueType::Bytes,
+                ..
+            },
+        ) => true,
+        (
+            Value::String(_),
+            ValueType {
+                prim_value_type: PrimValueType::String,
+                ..
+            },
+        ) => true,
+        (Value::Null, ValueType { nullable: true, .. }) => true,
+        _ => false,
     }
 }
 

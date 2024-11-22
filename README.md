@@ -50,8 +50,8 @@ use log_db::*;
 // Configure and initialize the database
 let mut db = DB::configure()
   .fields(vec![
-    (Field::Id, RecordField::int()),
-    (Field::Data, RecordField::bytes()),
+    (Field::Id, ValueType::int()),
+    (Field::Data, ValueType::bytes()),
   ])
   .primary_key(Field::Id)
   .initialize()?;
@@ -101,11 +101,11 @@ maturin build --release     # for the release version
 Then you can use the Python bindings like so:
 
 ```python
-from log_db_py import DB, Value, RecordField, Record
+from log_db_py import DB, Value, ValueType, Record
 
 config = DB.configure();
 config.primary_key = "id"
-config.fields = [("id", RecordField.int().nullable())]
+config.fields = [("id", ValueType.int().nullable())]
 
 db = config.initialize()
 db.upsert(Record(Value.int(10)))

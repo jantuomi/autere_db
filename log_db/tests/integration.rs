@@ -41,9 +41,9 @@ fn test_initialize_only() {
     let _db = DB::configure()
         .data_dir(&data_dir)
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -56,9 +56,9 @@ fn test_upsert_and_get_with_primary_memtable() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -81,14 +81,14 @@ fn test_upsert_and_get_with_primary_memtable() {
 }
 
 #[test]
-fn test_upsert_and_get_without_memtable() {
+fn test_upsert_and_get() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string().nullable()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string().nullable()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -151,7 +151,7 @@ fn test_upsert_fails_on_null_in_non_nullable_field() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(&[(Field::Id, RecordField::int())])
+        .fields(&[(Field::Id, ValueType::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -167,9 +167,9 @@ fn test_upsert_fails_on_invalid_number_of_values() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -189,9 +189,9 @@ fn test_upsert_fails_on_invalid_value_type() {
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()
@@ -206,15 +206,14 @@ fn test_upsert_fails_on_invalid_value_type() {
 }
 
 #[test]
-#[ignore]
-fn test_upsert_and_get_from_secondary_memtable() {
+fn test_upsert_and_find_all() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
         .data_dir(&data_dir)
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Name, RecordField::string()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .secondary_keys(vec![Field::Name])
@@ -243,10 +242,6 @@ fn test_upsert_and_get_from_secondary_memtable() {
     ]);
     db.upsert(&record2).unwrap();
 
-    // Delete the DB so that any results must come from a memtable
-    fs::remove_file(Path::new(&data_dir).join(ACTIVE_SYMLINK_FILENAME))
-        .expect("Failed to delete the DB log file");
-
     // There should be 2 Johns
     let johns = db
         .find_all(&Field::Name, &Value::String("John".to_string()))
@@ -267,7 +262,7 @@ fn test_multiple_writing_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(&[(Field::Id, RecordField::int())])
+                .fields(&[(Field::Id, ValueType::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -284,7 +279,7 @@ fn test_multiple_writing_threads() {
     // Read the records
     let mut db = DB::configure()
         .data_dir(&data_dir)
-        .fields(&[(Field::Id, RecordField::int())])
+        .fields(&[(Field::Id, ValueType::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -314,7 +309,7 @@ fn test_one_writer_and_multiple_reading_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(&[(Field::Id, RecordField::int())])
+                .fields(&[(Field::Id, ValueType::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -346,7 +341,7 @@ fn test_one_writer_and_multiple_reading_threads() {
     threads.push(thread::spawn(move || {
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(&[(Field::Id, RecordField::int())])
+            .fields(&[(Field::Id, ValueType::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -374,8 +369,8 @@ fn test_log_is_rotated_when_capacity_reached() {
         .data_dir(&data_dir)
         .segment_size(10 * record_len) // small log segment size
         .fields(&[
-            (Field::Id, RecordField::int()),
-            (Field::Data, RecordField::bytes()),
+            (Field::Id, ValueType::int()),
+            (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
         .initialize()

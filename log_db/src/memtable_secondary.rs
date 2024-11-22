@@ -1,5 +1,7 @@
+use once_cell::sync::Lazy;
+
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub struct SecondaryMemtable {
     /// Map of records indexed by key. The value is the set of primary key values of records
@@ -8,6 +10,8 @@ pub struct SecondaryMemtable {
     records: BTreeMap<IndexableValue, LogKeySet>,
 }
 
+static EMPTY_SET: Lazy<HashSet<LogKey>> = Lazy::new(|| HashSet::new());
+
 impl SecondaryMemtable {
     pub fn new() -> SecondaryMemtable {
         SecondaryMemtable {
@@ -15,15 +19,26 @@ impl SecondaryMemtable {
         }
     }
 
-    pub fn set(&mut self, key: &IndexableValue, value: &IndexableValue) {
-        unimplemented!();
+    pub fn set(&mut self, key: &IndexableValue, value: &LogKey) {
+        match self.records.get_mut(key) {
+            Some(set) => {
+                set.insert(value.clone());
+            }
+            None => {
+                self.records
+                    .insert(key.clone(), LogKeySet::new_with_initial(&value));
+            }
+        };
     }
 
-    pub fn set_all(&mut self, key: &IndexableValue, values: &LogKeySet) {
-        unimplemented!();
+    pub fn replace(&mut self, key: &IndexableValue, values: &LogKeySet) {
+        self.records.insert(key.clone(), values.clone());
     }
 
-    pub fn find_all(&self, key: &IndexableValue) -> &LogKeySet {
-        unimplemented!();
+    pub fn find_all(&self, key: &IndexableValue) -> &HashSet<LogKey> {
+        match self.records.get(key) {
+            Some(set) => set.log_keys(),
+            None => &EMPTY_SET,
+        }
     }
 }

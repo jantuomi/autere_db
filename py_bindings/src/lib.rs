@@ -6,42 +6,42 @@ type Field = String;
 
 #[pyclass]
 #[derive(Clone)]
-struct RecordField {
-    record_field: log_db::RecordField,
+struct ValueType {
+    record_field: log_db::ValueType,
 }
 
 #[pymethods]
-impl RecordField {
+impl ValueType {
     #[staticmethod]
     fn int() -> Self {
-        RecordField {
-            record_field: log_db::RecordField::int(),
+        ValueType {
+            record_field: log_db::ValueType::int(),
         }
     }
 
     #[staticmethod]
     fn float() -> Self {
-        RecordField {
-            record_field: log_db::RecordField::float(),
+        ValueType {
+            record_field: log_db::ValueType::float(),
         }
     }
 
     #[staticmethod]
     fn string() -> Self {
-        RecordField {
-            record_field: log_db::RecordField::string(),
+        ValueType {
+            record_field: log_db::ValueType::string(),
         }
     }
 
     #[staticmethod]
     fn bytes() -> Self {
-        RecordField {
-            record_field: log_db::RecordField::bytes(),
+        ValueType {
+            record_field: log_db::ValueType::bytes(),
         }
     }
 
     fn nullable(&self) -> Self {
-        RecordField {
+        ValueType {
             record_field: self.record_field.clone().nullable(),
         }
     }
@@ -60,7 +60,7 @@ struct Config {
     #[pyo3(get, set)]
     segment_size: Option<usize>,
     #[pyo3(get, set)]
-    fields: Option<Vec<(Field, RecordField)>>,
+    fields: Option<Vec<(Field, ValueType)>>,
     #[pyo3(get, set)]
     primary_key: Option<Field>,
     #[pyo3(get, set)]
@@ -203,7 +203,7 @@ impl DB {
 fn log_db_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_class::<DB>()?;
-    m.add_class::<RecordField>()?;
+    m.add_class::<ValueType>()?;
     m.add_class::<Value>()?;
     m.add_class::<Record>()?;
     Ok(())

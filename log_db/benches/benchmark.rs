@@ -24,9 +24,9 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
         let mut db = DB::configure()
             .data_dir(&data_dir)
             .fields(&[
-                (Field::Id, RecordField::int()),
-                (Field::Name, RecordField::string()),
-                (Field::Data, RecordField::bytes()),
+                (Field::Id, ValueType::int()),
+                (Field::Name, ValueType::string()),
+                (Field::Data, ValueType::bytes()),
             ])
             .primary_key(Field::Id)
             .initialize()
@@ -59,9 +59,9 @@ pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
         let mut db = DB::configure()
             .data_dir(&data_dir)
             .fields(&[
-                (Field::Id, RecordField::int()),
-                (Field::Name, RecordField::string()),
-                (Field::Data, RecordField::bytes()),
+                (Field::Id, ValueType::int()),
+                (Field::Name, ValueType::string()),
+                (Field::Data, ValueType::bytes()),
             ])
             .segment_size(1000 * record_length)
             .primary_key(Field::Id)
@@ -96,9 +96,9 @@ pub fn upsert_write_durability(c: &mut Criterion) {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
                 .fields(&[
-                    (Field::Id, RecordField::int()),
-                    (Field::Name, RecordField::string()),
-                    (Field::Data, RecordField::bytes()),
+                    (Field::Id, ValueType::int()),
+                    (Field::Name, ValueType::string()),
+                    (Field::Data, ValueType::bytes()),
                 ])
                 .write_durability(mode.clone())
                 .primary_key(Field::Id)
@@ -125,9 +125,9 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
         let mut db = DB::configure()
             .data_dir(&data_dir)
             .fields(&[
-                (Field::Id, RecordField::int()),
-                (Field::Name, RecordField::string()),
-                (Field::Data, RecordField::bytes()),
+                (Field::Id, ValueType::int()),
+                (Field::Name, ValueType::string()),
+                (Field::Data, ValueType::bytes()),
             ])
             .primary_key(Field::Id)
             .initialize()
@@ -155,9 +155,9 @@ pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
         let mut db = DB::configure()
             .data_dir(&data_dir)
             .fields(&[
-                (Field::Id, RecordField::int()),
-                (Field::Name, RecordField::string()),
-                (Field::Data, RecordField::bytes()),
+                (Field::Id, ValueType::int()),
+                (Field::Name, ValueType::string()),
+                (Field::Data, ValueType::bytes()),
             ])
             .primary_key(Field::Id)
             .initialize()
