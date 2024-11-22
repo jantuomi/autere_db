@@ -10,6 +10,7 @@ mod memtable_secondary;
 pub use common::*;
 use fs2::FileExt;
 pub use log_reader_forward::ForwardLogReader;
+use log_reader_forward::ForwardLogReaderItem;
 pub use log_reader_reverse::ReverseLogReader;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
@@ -131,6 +132,7 @@ pub struct DB<Field: Eq + Clone + Debug> {
     primary_key_index: usize,
     primary_memtable: PrimaryMemtable,
     secondary_memtables: Vec<SecondaryMemtable>,
+    refresh_next_logkey: LogKey,
 }
 
 impl<Field: Eq + Clone + Debug> DB<Field> {
@@ -237,7 +239,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = APPEND_MODE.open(&active_data_path)?;
 
-        let db = DB::<Field> {
+        let mut db = DB::<Field> {
             config: config.clone(),
             data_dir: data_dir_path.to_path_buf(),
             active_metadata_file,
@@ -245,14 +247,60 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             primary_key_index,
             primary_memtable,
             secondary_memtables,
+            refresh_next_logkey: LogKey::new(1, 0),
         };
 
-        // info!("Rebuilding memtable indexes...");
-        // TODO FIXME build memtable indexes
+        info!("Rebuilding memtable indexes...");
+        db.refresh_indexes()?;
 
         info!("Database ready.");
 
         Ok(db)
+    }
+
+    fn refresh_indexes(&mut self) -> Result<(), io::Error> {
+        let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
+        let active_target = fs::read_link(active_symlink_path)?;
+        let active_metadata_path = self.data_dir.join(active_target);
+
+        let to_segnum = parse_segment_number(&active_metadata_path)?;
+        let from_segnum = self.refresh_next_logkey.segment_num();
+        let mut from_index = self.refresh_next_logkey.index();
+
+        for segnum in from_segnum..=to_segnum {
+            let metadata_path = self.data_dir.join(metadata_filename(segnum));
+            let mut metadata_file = READ_MODE.open(metadata_path)?;
+
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
+
+            let metadata_header = read_metadata_header(&mut metadata_file)?;
+            validate_metadata_header(&metadata_header)?;
+
+            let data_path = self.data_dir.join(metadata_header.uuid.to_string());
+            let data_file = READ_MODE.open(data_path)?;
+
+            for ForwardLogReaderItem { record, index } in
+                ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
+            {
+                let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+                let log_key = LogKey::new(segnum, index);
+                self.primary_memtable.set(&pk, &log_key);
+
+                // Update from_index in case this is the last iteration: we need to know the next
+                // index that should be read on later invocations of refresh_indexes.
+                from_index = index + 1
+            }
+
+            // If there are still segments to read, set from_index to zero to read them
+            // from beginning. Otherwise we leave from_index as the index of the next record to read.
+            if segnum != to_segnum {
+                from_index = 0
+            }
+        }
+
+        self.refresh_next_logkey = LogKey::new(to_segnum, from_index);
+
+        Ok(())
     }
 
     /// Insert a record into the database. If the primary key value already exists,
@@ -623,6 +671,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         self.active_metadata_file.unlock()?;
 
+        self.refresh_indexes()?;
+
         Ok(())
     }
 
@@ -643,12 +693,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         self.active_data_file.unlock()?;
 
         let mut read_n = 0;
-        for (original_index, record) in forward_log_reader.enumerate() {
-            let primary_key = record
+        for (original_index, item) in forward_log_reader.enumerate() {
+            let primary_key = item
+                .record
                 .at(self.primary_key_index)
                 .as_indexable()
                 .expect("Primary key was not indexable");
-            map.insert(primary_key, (original_index, record));
+            map.insert(primary_key, (original_index, item.record));
             read_n += 1;
         }
 

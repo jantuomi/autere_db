@@ -7,7 +7,12 @@ pub struct ForwardLogReader {
     data_reader: io::BufReader<fs::File>,
 }
 
-impl<'a> ForwardLogReader {
+pub struct ForwardLogReaderItem {
+    pub record: Record,
+    pub index: u64,
+}
+
+impl ForwardLogReader {
     pub fn new(metadata_file: fs::File, data_file: fs::File) -> ForwardLogReader {
         let mut ret = ForwardLogReader {
             metadata_reader: io::BufReader::new(metadata_file),
@@ -21,8 +26,30 @@ impl<'a> ForwardLogReader {
         ret
     }
 
-    fn read_record(&mut self) -> Result<Option<Record>, io::Error> {
+    pub fn new_with_index(
+        metadata_file: fs::File,
+        data_file: fs::File,
+        index: u64,
+    ) -> ForwardLogReader {
+        let mut ret = ForwardLogReader {
+            metadata_reader: io::BufReader::new(metadata_file),
+            data_reader: io::BufReader::new(data_file),
+        };
+
+        ret.metadata_reader
+            .seek(io::SeekFrom::Start(
+                METADATA_FILE_HEADER_SIZE as u64 + METADATA_ROW_LENGTH as u64 * index,
+            ))
+            .expect("Seek failed");
+
+        ret
+    }
+
+    fn read_record(&mut self) -> Result<Option<ForwardLogReaderItem>, io::Error> {
         loop {
+            let pos = self.metadata_reader.stream_position()?;
+            let index = (pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
+
             let mut metadata_entry_buf = vec![0; 16]; // 2x u64
             if let Err(e) = self.metadata_reader.read_exact(&mut metadata_entry_buf) {
                 if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -50,13 +77,13 @@ impl<'a> ForwardLogReader {
             self.data_reader.read_exact(&mut result_buf)?;
 
             let record = Record::deserialize(&result_buf);
-            return Ok(Some(record));
+            return Ok(Some(ForwardLogReaderItem { record, index }));
         }
     }
 }
 
 impl Iterator for ForwardLogReader {
-    type Item = Record;
+    type Item = ForwardLogReaderItem;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.read_record() {
@@ -93,7 +120,7 @@ mod tests {
         let first_record = forward_log_reader
             .next()
             .expect("Failed to read the first record");
-        assert!(match first_record.values() {
+        assert!(match first_record.record.values() {
             [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });

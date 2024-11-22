@@ -564,18 +564,9 @@ pub fn create_segment_metadata_file(
     Ok((new_num, metadata_path))
 }
 
-/// Get the number of the segment with the greatest ordinal.
-/// This is the newest segment, i.e. the one that is pointed to by the `active` symlink.
-/// If there are no segments yet, returns 0.
-pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
-    let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
-
-    if !fs::exists(&active_symlink)? {
-        return Ok(0);
-    }
-
-    let segment_metadata_path = fs::read_link(&active_symlink)?;
-    let filename = segment_metadata_path
+/// Parse the segment number from a metadata file path
+pub fn parse_segment_number(metadata_path: &Path) -> Result<u16, io::Error> {
+    let filename = metadata_path
         .file_name()
         .expect("No filename in symlink")
         .to_str()
@@ -594,6 +585,20 @@ pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
             "Failed to parse segment number from filename",
         )
     })
+}
+
+/// Get the number of the segment with the greatest ordinal.
+/// This is the newest segment, i.e. the one that is pointed to by the `active` symlink.
+/// If there are no segments yet, returns 0.
+pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
+    let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+
+    if !fs::exists(&active_symlink)? {
+        return Ok(0);
+    }
+
+    let segment_metadata_path = fs::read_link(&active_symlink)?;
+    parse_segment_number(&segment_metadata_path)
 }
 
 /// Create a new segment data file and return its UUID.
