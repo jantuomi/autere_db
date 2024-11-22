@@ -76,8 +76,8 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
 
     /// The secondary keys of the database, used to construct
     /// the secondary memtable indexes.
-    pub fn secondary_keys(&mut self, secondary_keys: Vec<Field>) -> &mut Self {
-        self.secondary_keys = Some(secondary_keys);
+    pub fn secondary_keys(&mut self, secondary_keys: &[Field]) -> &mut Self {
+        self.secondary_keys = Some(secondary_keys.to_vec());
         self
     }
 
@@ -315,22 +315,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             for ForwardLogReaderItem { record, index } in
                 ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
             {
-                let pk = record.at(self.primary_key_index).as_indexable().unwrap();
                 let log_key = LogKey::new(segnum, index);
-                self.primary_memtable.set(&pk, &log_key);
-
-                for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
-                    let secondary_memtable = &mut self.secondary_memtables[sk_index];
-                    let sk_field_index = self
-                        .config
-                        .fields
-                        .iter()
-                        .position(|(f, _)| sk_field == f)
-                        .unwrap();
-                    let sk = record.at(sk_field_index).as_indexable().unwrap();
-
-                    secondary_memtable.set(&sk, &log_key);
-                }
+                self.insert_record_to_memtables(&log_key, &record);
 
                 // Update from_index in case this is the last iteration: we need to know the next
                 // index that should be read on later invocations of refresh_indexes.
@@ -347,6 +333,24 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         self.refresh_next_logkey = LogKey::new(to_segnum, from_index);
 
         Ok(())
+    }
+
+    fn insert_record_to_memtables(&mut self, log_key: &LogKey, record: &Record) {
+        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+        self.primary_memtable.set(&pk, &log_key);
+
+        for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
+            let secondary_memtable = &mut self.secondary_memtables[sk_index];
+            let sk_field_index = self
+                .config
+                .fields
+                .iter()
+                .position(|(f, _)| sk_field == f)
+                .unwrap();
+            let sk = record.at(sk_field_index).as_indexable().unwrap();
+
+            secondary_memtable.set(&sk, &log_key);
+        }
     }
 
     /// Insert a record into the database. If the primary key value already exists,
@@ -372,6 +376,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         self.active_data_file.lock_exclusive()?;
 
+        let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
+        let active_target = fs::read_link(active_symlink_path)?;
+        let segment_num = parse_segment_number(&active_target)?;
+
         debug!("Exclusive lock acquired, appending to log file");
 
         // Write the record to the log
@@ -388,6 +396,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.active_data_file.flush()?;
             self.active_data_file.sync_all()?;
         }
+
+        let metadata_pos = self.active_metadata_file.seek(SeekFrom::End(0))?;
+        let metadata_index =
+            (metadata_pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
 
         // Write the record metadata to the metadata file
         let mut metadata_buf = vec![];
@@ -406,19 +418,23 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             self.active_metadata_file.sync_all()?;
         }
 
+        debug!("Record appended to log file, releasing locks");
+
         // Manually release the locks because the file handles are left open
         self.active_data_file.unlock()?;
         self.active_metadata_file.unlock()?;
 
-        debug!("Record appended to log file, lock released");
+        debug!("Update memtables with newly written data");
+        let log_key = LogKey::new(segment_num, metadata_index);
+
+        self.insert_record_to_memtables(&log_key, &record);
 
         let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
         assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
         assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
 
-        // Depending on write durability, the data might not be written to disk yet
-        //let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
-        //assert_eq!(data_file_len, record_offset + record_length);
+        let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
+        assert_eq!(data_file_len, record_offset + record_length);
 
         Ok(())
     }
@@ -766,11 +782,14 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[derive(Eq, PartialEq, Clone, Debug)]
     enum Field {
         Id,
+        Name,
     }
 
     #[test]
@@ -918,5 +937,47 @@ mod tests {
             .expect("Failed to open file");
         let len = file.seek(SeekFrom::End(0)).expect("Failed to seek");
         assert_eq!(len, METADATA_FILE_HEADER_SIZE as u64 + n_recs * 16);
+    }
+
+    #[test]
+    fn test_memtables_updated_on_write() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let mut db = DB::configure()
+            .data_dir(data_dir.to_str().unwrap())
+            .fields(&[
+                (Field::Id, ValueType::int()),
+                (Field::Name, ValueType::string()),
+            ])
+            .primary_key(Field::Id)
+            .secondary_keys(&[Field::Name])
+            .initialize()
+            .expect("Failed to create DB");
+
+        // Check that the key is not indexed before write
+        assert_eq!(db.primary_memtable.get(&IndexableValue::Int(0)), None);
+        assert_eq!(
+            db.secondary_memtables[0].find_all(&IndexableValue::String("John".to_string())),
+            &HashSet::new()
+        );
+
+        // Insert record
+        let record = Record::from(&[Value::Int(0), Value::String("John".to_string())]);
+        db.upsert(&record).expect("Failed to insert record");
+
+        // Check that the key is now indexed
+        let expected_log_key = LogKey::new(1, 0);
+        assert_eq!(
+            db.primary_memtable.get(&IndexableValue::Int(0)),
+            Some(&expected_log_key)
+        );
+        let mut expected_set: HashSet<LogKey> = HashSet::new();
+        expected_set.insert(expected_log_key);
+        assert_eq!(
+            db.secondary_memtables[0].find_all(&IndexableValue::String("John".to_string())),
+            &expected_set,
+        );
     }
 }

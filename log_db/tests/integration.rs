@@ -216,7 +216,7 @@ fn test_upsert_and_find_all() {
             (Field::Data, ValueType::bytes()),
         ])
         .primary_key(Field::Id)
-        .secondary_keys(vec![Field::Name])
+        .secondary_keys(&[Field::Name])
         .initialize()
         .expect("Failed to initialize DB instance");
 

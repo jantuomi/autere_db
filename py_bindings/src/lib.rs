@@ -91,7 +91,7 @@ impl Config {
         }
         if self.secondary_keys.is_some() {
             let tmp = self.secondary_keys.as_ref().unwrap();
-            config.secondary_keys(tmp.clone());
+            config.secondary_keys(&tmp);
         }
         if self.write_durability.is_some() {
             let tmp = self.write_durability.as_ref().unwrap();
