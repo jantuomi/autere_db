@@ -31,10 +31,6 @@ impl SecondaryMemtable {
         };
     }
 
-    pub fn replace(&mut self, key: &IndexableValue, values: &LogKeySet) {
-        self.records.insert(key.clone(), values.clone());
-    }
-
     pub fn find_all(&self, key: &IndexableValue) -> &HashSet<LogKey> {
         match self.records.get(key) {
             Some(set) => set.log_keys(),

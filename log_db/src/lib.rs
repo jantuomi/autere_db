@@ -18,9 +18,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
