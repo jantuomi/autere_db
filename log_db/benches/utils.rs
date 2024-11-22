@@ -2,7 +2,6 @@ use log_db::*;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::fmt::Debug;
-use std::io;
 
 // Function to generate a random integer
 pub fn random_int(from: i64, to: i64) -> i64 {
@@ -35,7 +34,7 @@ pub fn prefill_db<T: Eq + Clone + Debug>(
     db: &mut DB<T>,
     n_records: usize,
     compact: bool,
-) -> Result<(), io::Error> {
+) -> Result<(), DBError> {
     for _ in 0..n_records {
         let record = random_record(0, n_records as i64);
         db.upsert(&record)?;

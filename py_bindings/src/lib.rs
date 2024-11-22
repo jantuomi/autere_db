@@ -98,7 +98,9 @@ impl Config {
             config.write_durability(tmp.write_durability.clone());
         }
 
-        let db = config.initialize().map_err(|e| PyException::new_err(e))?;
+        let db = config
+            .initialize()
+            .map_err(|e| PyException::new_err(e.to_string()))?;
         Ok(DB { db })
     }
 }
@@ -177,7 +179,7 @@ impl DB {
 
         self.db
             .upsert(&log_db::Record::from(&values))
-            .map_err(|e| PyException::new_err(e))?;
+            .map_err(|e| PyException::new_err(e.to_string()))?;
         Ok(())
     }
 

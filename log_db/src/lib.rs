@@ -19,6 +19,7 @@ use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
@@ -96,7 +97,7 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         self
     }
 
-    pub fn initialize(&self) -> Result<DB<Field>, io::Error> {
+    pub fn initialize(&self) -> Result<DB<Field>, DBError> {
         let config = Config::<Field> {
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
             segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
@@ -155,7 +156,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         ConfigBuilder::new()
     }
 
-    fn initialize(config: &Config<Field>) -> Result<DB<Field>, io::Error> {
+    fn initialize(config: &Config<Field>) -> Result<DB<Field>, DBError> {
         info!("Initializing DB...");
         // If data_dir does not exist or is empty, create it and any necessary files
         // After creation, the directory should always be in a complete state
@@ -168,7 +169,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             Ok(_) => {}
             Err(e) => {
                 if e.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(e);
+                    return Err(DBError::IOError(e));
                 }
             }
         }
@@ -231,9 +232,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             match prim_value_type {
                 PrimValueType::Int | PrimValueType::String => {}
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Secondary key must be an IndexableValue",
+                    return Err(DBError::ValidationError(
+                        "Secondary key must be an IndexableValue".to_owned(),
                     ))
                 }
             }
@@ -277,7 +277,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         Ok(db)
     }
 
-    fn refresh_indexes(&mut self) -> Result<(), io::Error> {
+    fn refresh_indexes(&mut self) -> Result<(), DBError> {
         let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
         let active_target = fs::read_link(active_symlink_path)?;
         let active_metadata_path = self.data_dir.join(active_target);
@@ -292,17 +292,15 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
             let metadata_len = metadata_file.seek(SeekFrom::End(0))?;
             if (metadata_len - METADATA_FILE_HEADER_SIZE as u64) % METADATA_ROW_LENGTH as u64 != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Metadata file {} has invalid size: {}",
-                        metadata_path.display(),
-                        metadata_len
-                    ),
-                ));
+                return Err(DBError::ConsistencyError(format!(
+                    "Metadata file {} has invalid size: {}",
+                    metadata_path.display(),
+                    metadata_len
+                )));
             }
 
-            request_shared_lock(&self.data_dir, &mut metadata_file)?;
+            request_shared_lock(&self.data_dir, &mut metadata_file)
+                .map_err(|lre| DBError::LockRequestError(lre))?;
 
             let metadata_header = read_metadata_header(&mut metadata_file)?;
             validate_metadata_header(&metadata_header)?;
@@ -353,7 +351,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Insert a record into the database. If the primary key value already exists,
     /// the existing record will be replaced by the supplied one.
-    pub fn upsert(&mut self, record: &Record) -> Result<(), io::Error> {
+    pub fn upsert(&mut self, record: &Record) -> Result<(), DBError> {
         debug!("Upserting record: {:?}", record);
 
         record.validate(&self.config.fields)?;
@@ -439,16 +437,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
-    pub fn get(&mut self, query_key: &Value) -> Result<Option<Record>, io::Error> {
+    pub fn get(&mut self, query_key: &Value) -> Result<Option<Record>, DBError> {
         let pk_type = &self.config.fields[self.primary_key_index].1;
         if !type_check(&query_key, &pk_type) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Queried value does not match primary key type: {:?}",
-                    pk_type
-                ),
-            ));
+            return Err(DBError::ValidationError(format!(
+                "Queried value does not match primary key type: {:?}",
+                pk_type
+            )));
         }
 
         debug!(
@@ -515,7 +510,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Get a collection of records based on a field value.
     /// Indexes will be used if they contain the requested key.
-    pub fn find_all(&mut self, field: &Field, query_key: &Value) -> Result<Vec<Record>, io::Error> {
+    pub fn find_all(&mut self, field: &Field, query_key: &Value) -> Result<Vec<Record>, DBError> {
         // If querying by primary key, return the result of `get` wrapped in a vec.
         if field == &self.config.primary_key {
             return match self.get(query_key)? {
@@ -539,9 +534,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             match get_secondary_memtable_index_by_field(&self.config.secondary_keys, field) {
                 Some(index) => index,
                 None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "Cannot find_all by non-secondary key",
+                    return Err(DBError::ValidationError(
+                        "Cannot find_all by non-secondary key".to_owned(),
                     ))
                 }
             };
@@ -607,7 +601,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
     /// If the segment has been rotated, the handle will be closed and reopened.
     /// Returns `false` if the file has been rotated and the handle has been reopened, `true` otherwise.
-    fn ensure_metadata_file_is_active(&mut self) -> Result<bool, io::Error> {
+    fn ensure_metadata_file_is_active(&mut self) -> Result<bool, DBError> {
         let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
         let active_metadata_path = &self.data_dir.join(active_target);
 
@@ -640,7 +634,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     /// Note that this function is synchronous and may block for a relatively long time.
     /// You may call this function in a separate thread or process to avoid blocking the main thread.
     /// However, the database will be exclusively locked, so all writes and reads will be blocked during the tasks.
-    pub fn do_maintenance_tasks(&mut self) -> Result<(), io::Error> {
+    pub fn do_maintenance_tasks(&mut self) -> Result<(), DBError> {
         request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
 
         ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?;

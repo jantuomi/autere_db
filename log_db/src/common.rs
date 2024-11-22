@@ -7,6 +7,7 @@ use std::fs::{self, metadata, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
+use thiserror::Error;
 use uuid::Uuid;
 
 // For Unix-like systems
@@ -27,6 +28,18 @@ pub const TEST_RESOURCES_DIR: &str = "tests/resources";
 
 pub fn metadata_filename(num: u16) -> String {
     format!("metadata.{}", num)
+}
+
+#[derive(Debug, Error)]
+pub enum DBError {
+    #[error("lock request failed: {0}")]
+    LockRequestError(#[from] LockRequestError),
+    #[error("validation failed: {0}")]
+    ValidationError(String),
+    #[error("consistency check failed: {0}")]
+    ConsistencyError(String),
+    #[error("unexpected IO error: {0}")]
+    IOError(#[from] io::Error),
 }
 
 /// LogKey is a packed struct that contains:
@@ -667,11 +680,10 @@ pub fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHead
     Ok(header)
 }
 
-pub fn validate_metadata_header(header: &MetadataHeader) -> Result<(), io::Error> {
+pub fn validate_metadata_header(header: &MetadataHeader) -> Result<(), DBError> {
     if header.version != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Unsupported metadata file version",
+        return Err(DBError::ValidationError(
+            "Unsupported metadata file version".to_owned(),
         ));
     }
 
@@ -773,7 +785,19 @@ pub fn ensure_active_metadata_is_valid(
     }
 }
 
-pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, io::Error> {
+const LOCK_WAIT_MAX_MS: u64 = 100;
+
+#[derive(Error, Debug)]
+pub enum LockRequestError {
+    #[error("lock request file was removed unexpectedly")]
+    LockRequestFileRemoved,
+    #[error("timed out while waiting for a lock, max wait time: {0} ms")]
+    TimedOut(u64),
+    #[error("unexpected IO error: {0}")]
+    IOError(#[from] io::Error),
+}
+
+pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, LockRequestError> {
     let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
     let lock_request_file = fs::OpenOptions::new()
         .create(true)
@@ -787,16 +811,14 @@ pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, io::Error> {
             if e.kind() == lock_contended_error().kind() {
                 return Ok(true);
             }
-            return Err(e);
+            return Err(LockRequestError::IOError(e));
         }
+
         Ok(_) => {
             // Check that the exclusive lock request file is still the same as the one we opened
             if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
                 // The lock request file has been removed
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Lock request file was removed unexpectedly",
-                ));
+                return Err(LockRequestError::LockRequestFileRemoved);
             }
 
             lock_request_file.unlock()?;
@@ -805,8 +827,7 @@ pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, io::Error> {
     }
 }
 
-pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), io::Error> {
-    const SHARED_LOCK_WAIT_MAX_MS: u64 = 100;
+pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), LockRequestError> {
     let mut timeout = 5;
     loop {
         if is_exclusive_lock_requested(data_dir)? {
@@ -815,7 +836,11 @@ pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), i
                 timeout
             );
             thread::sleep(std::time::Duration::from_millis(timeout));
-            timeout = std::cmp::min(timeout * 2, SHARED_LOCK_WAIT_MAX_MS);
+            timeout *= 2;
+
+            if timeout > LOCK_WAIT_MAX_MS {
+                return Err(LockRequestError::TimedOut(LOCK_WAIT_MAX_MS));
+            }
         } else {
             file.lock_shared()?;
             return Ok(());

@@ -309,6 +309,7 @@ fn test_one_writer_and_multiple_reading_threads() {
         threads.push(thread::spawn(move || {
             let mut db = DB::configure()
                 .data_dir(&data_dir)
+                .segment_size(1000) // should cause rotations
                 .fields(&[(Field::Id, ValueType::int())])
                 .primary_key(Field::Id)
                 .initialize()
@@ -316,8 +317,6 @@ fn test_one_writer_and_multiple_reading_threads() {
 
             let mut timeout = 5;
             loop {
-                db.do_maintenance_tasks() // Run maintenance tasks on every read, just to test it
-                    .expect("Failed to do maintenance tasks");
                 let result = db.get(&Value::Int(i)).expect("Failed to get record");
                 match result {
                     None => {
@@ -349,6 +348,9 @@ fn test_one_writer_and_multiple_reading_threads() {
         for i in 0..threads_n {
             let record = Record::from(&[Value::Int(i)]);
             db.upsert(&record).expect("Failed to upsert record");
+
+            db.do_maintenance_tasks() // Run maintenance tasks after every write, just to test it
+                .expect("Failed to do maintenance tasks");
         }
     }));
 
