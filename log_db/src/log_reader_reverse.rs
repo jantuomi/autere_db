@@ -32,35 +32,43 @@ impl ReverseLogReader {
     }
 
     fn read_record(&mut self) -> Result<Option<Record>, io::Error> {
-        assert!(
-            (self.metadata_pos - METADATA_FILE_HEADER_SIZE) % 16 == 0,
-            "metadata_pos is not aligned"
-        );
+        loop {
+            assert!(
+                (self.metadata_pos - METADATA_FILE_HEADER_SIZE) % 16 == 0,
+                "metadata_pos is not aligned"
+            );
+            // Return None if we have read the entire metadata file and
+            // reached the end of the header
+            if self.metadata_pos == METADATA_FILE_HEADER_SIZE {
+                return Ok(None);
+            }
 
-        // Return None if we have read the entire metadata file and
-        // reached the end of the header
-        if self.metadata_pos == METADATA_FILE_HEADER_SIZE {
-            return Ok(None);
+            self.metadata_pos -= 16;
+            let i = self.metadata_pos; // shorter alias
+
+            // First u64 is the offset of the record in the data file, second is the length of the record
+            let entry_offset = u64::from_be_bytes(self.metadata_buf[i..i + 8].try_into().unwrap());
+            let entry_length =
+                u64::from_be_bytes(self.metadata_buf[i + 8..i + 16].try_into().unwrap());
+
+            if entry_offset == 0 && entry_length == 0 {
+                // This is an unused entry in the metadata file, skip
+                continue;
+            }
+
+            self.data_reader.seek(io::SeekFrom::Start(entry_offset))?;
+            let mut result_buf = vec![0; entry_length as usize];
+            self.data_reader.read_exact(&mut result_buf)?;
+
+            let record = Record::deserialize(&result_buf);
+
+            assert!(
+                (self.metadata_pos - METADATA_FILE_HEADER_SIZE) % 16 == 0,
+                "metadata_pos is not aligned"
+            );
+
+            return Ok(Some(record));
         }
-
-        self.metadata_pos -= 16;
-        let i = self.metadata_pos; // shorter alias
-
-        // First u64 is the offset of the record in the data file, second is the length of the record
-        let entry_offset = u64::from_be_bytes(self.metadata_buf[i..i + 8].try_into().unwrap());
-        let entry_length = u64::from_be_bytes(self.metadata_buf[i + 8..i + 16].try_into().unwrap());
-
-        self.data_reader.seek(io::SeekFrom::Start(entry_offset))?;
-        let mut result_buf = vec![0; entry_length as usize];
-        self.data_reader.read_exact(&mut result_buf)?;
-
-        let record = Record::deserialize(&result_buf);
-
-        assert!(
-            (self.metadata_pos - METADATA_FILE_HEADER_SIZE) % 16 == 0,
-            "metadata_pos is not aligned"
-        );
-        Ok(Some(record))
     }
 }
 

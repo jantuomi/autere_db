@@ -22,29 +22,36 @@ impl<'a> ForwardLogReader {
     }
 
     fn read_record(&mut self) -> Result<Option<Record>, io::Error> {
-        let mut metadata_entry_buf = vec![0; 16]; // 2x u64
-        if let Err(e) = self.metadata_reader.read_exact(&mut metadata_entry_buf) {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                return Ok(None);
-            } else {
-                return Err(e);
+        loop {
+            let mut metadata_entry_buf = vec![0; 16]; // 2x u64
+            if let Err(e) = self.metadata_reader.read_exact(&mut metadata_entry_buf) {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    return Ok(None);
+                } else {
+                    return Err(e);
+                }
             }
+
+            // First u64 is the offset of the record in the data file, second is the length of the record
+            let entry_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
+            let entry_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
+
+            if entry_offset == 0 && entry_length == 0 {
+                // This is an unused entry in the metadata file, skip
+                continue;
+            }
+
+            // Use .seek_relative instead of .seek to avoid dropping the BufReader internal buffer when
+            // the seek distance is small
+            let seek_distance = entry_offset as i64 - self.data_reader.stream_position()? as i64;
+            self.data_reader.seek_relative(seek_distance)?;
+
+            let mut result_buf = vec![0; entry_length as usize];
+            self.data_reader.read_exact(&mut result_buf)?;
+
+            let record = Record::deserialize(&result_buf);
+            return Ok(Some(record));
         }
-
-        // First u64 is the offset of the record in the data file, second is the length of the record
-        let entry_offset = u64::from_be_bytes(metadata_entry_buf[0..8].try_into().unwrap());
-        let entry_length = u64::from_be_bytes(metadata_entry_buf[8..16].try_into().unwrap());
-
-        // Use .seek_relative instead of .seek to avoid dropping the BufReader internal buffer when
-        // the seek distance is small
-        let seek_distance = entry_offset as i64 - self.data_reader.stream_position()? as i64;
-        self.data_reader.seek_relative(seek_distance)?;
-
-        let mut result_buf = vec![0; entry_length as usize];
-        self.data_reader.read_exact(&mut result_buf)?;
-
-        let record = Record::deserialize(&result_buf);
-        Ok(Some(record))
     }
 }
 
