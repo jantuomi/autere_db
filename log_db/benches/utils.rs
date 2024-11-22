@@ -24,13 +24,11 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 
 // Function to generate a random record
 pub fn random_record(from_id: i64, to_id: i64) -> Record {
-    Record {
-        values: vec![
-            Value::Int(random_int(from_id, to_id)), // Random int value between 0..1000
-            Value::String(random_string(5)),        // Random string of length 5
-            Value::Bytes(random_bytes(10)),         // Random bytes of length 10
-        ],
-    }
+    Record::from(&[
+        Value::Int(random_int(from_id, to_id)), // Random int value between 0..1000
+        Value::String(random_string(5)),        // Random string of length 5
+        Value::Bytes(random_bytes(10)),         // Random bytes of length 10
+    ])
 }
 
 pub fn prefill_db<T: Eq + Clone + Debug>(

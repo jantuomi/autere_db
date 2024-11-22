@@ -23,7 +23,7 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(vec![
+            .fields(&[
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
                 (Field::Data, RecordField::bytes()),
@@ -58,7 +58,7 @@ pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
 
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(vec![
+            .fields(&[
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
                 (Field::Data, RecordField::bytes()),
@@ -86,11 +86,7 @@ pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
 pub fn upsert_write_durability(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert_write_durability");
 
-    for mode in [
-        WriteDurability::Async,
-        WriteDurability::Flush,
-        WriteDurability::FlushSync,
-    ] {
+    for mode in [WriteDurability::Flush, WriteDurability::FlushSync] {
         group.bench_with_input(BenchmarkId::from_parameter(&mode), &mode, |b, _mode| {
             let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
             let data_dir = &data_dir_obj
@@ -99,7 +95,7 @@ pub fn upsert_write_durability(c: &mut Criterion) {
                 .expect("Failed to convert tmpdir path to str");
             let mut db = DB::configure()
                 .data_dir(&data_dir)
-                .fields(vec![
+                .fields(&[
                     (Field::Id, RecordField::int()),
                     (Field::Name, RecordField::string()),
                     (Field::Data, RecordField::bytes()),
@@ -128,7 +124,7 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(vec![
+            .fields(&[
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
                 (Field::Data, RecordField::bytes()),
@@ -158,7 +154,7 @@ pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
             .expect("Failed to convert tmpdir path to str");
         let mut db = DB::configure()
             .data_dir(&data_dir)
-            .fields(vec![
+            .fields(&[
                 (Field::Id, RecordField::int()),
                 (Field::Name, RecordField::string()),
                 (Field::Data, RecordField::bytes()),
