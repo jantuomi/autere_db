@@ -26,4 +26,8 @@ impl PrimaryMemtable {
     pub fn get(&self, key: &IndexableValue) -> Option<&LogKey> {
         self.records.get(key)
     }
+
+    pub fn remove(&mut self, key: &IndexableValue) -> Option<LogKey> {
+        self.records.remove(key)
+    }
 }

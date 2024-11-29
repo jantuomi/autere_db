@@ -385,12 +385,22 @@ impl Value {
 }
 
 #[derive(Debug, Clone)]
-pub struct Record(Vec<Value>);
+pub struct Record {
+    values: Vec<Value>,
+    tombstone: bool,
+}
 
 impl Record {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        for value in &self.0 {
+
+        if self.tombstone {
+            bytes.extend(&[0xFF]);
+        } else {
+            bytes.extend(&[0]);
+        }
+
+        for value in &self.values {
             bytes.extend(value.serialize());
         }
         bytes
@@ -398,43 +408,50 @@ impl Record {
 
     pub fn deserialize(bytes: &[u8]) -> Record {
         let mut values = Vec::new();
-        let mut start = 0;
+
+        let tombstone = bytes[0] == 0xFF;
+
+        let mut start = 1;
         while start < bytes.len() {
             let (rv, consumed) = Value::deserialize(&bytes[start..]);
             values.push(rv);
             start += consumed;
         }
-        Record(values)
+        Record { values, tombstone }
     }
 
     pub fn from(values: &[Value]) -> Record {
-        Record(values.to_vec())
+        Record {
+            values: values.to_vec(),
+            tombstone: false,
+        }
     }
 
     pub fn values(&self) -> &[Value] {
-        &self.0
+        &self.values
     }
 
     pub fn at(&self, index: usize) -> &Value {
-        &self.0[index]
+        &self.values[index]
     }
 
-    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> Result<(), io::Error> {
+    pub fn is_tombstone(&self) -> bool {
+        self.tombstone
+    }
+
+    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> Result<(), DBError> {
         // Validate the record length
-        if self.0.len() != schema.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Record has an incorrect number of fields: {}, expected {}",
-                    self.0.len(),
-                    schema.len()
-                ),
-            ));
+        if self.values.len() != schema.len() {
+            return Err(DBError::ValidationError(format!(
+                "Record has an incorrect number of fields: {}, expected {}",
+                self.values.len(),
+                schema.len()
+            )));
         }
 
         // Validate that record fields match schema types
         for (i, (_, field)) in schema.iter().enumerate() {
-            match (&self.0[i], field) {
+            match (&self.values[i], field) {
                 (
                     Value::Null,
                     ValueType {
@@ -464,13 +481,10 @@ impl Record {
                     },
                 ) => {}
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Record field {} has incorrect type: {:?}, expected {:?}",
-                            &i, &self.0[i], &field.prim_value_type
-                        ),
-                    ))
+                    return Err(DBError::ValidationError(format!(
+                        "Record field {} has incorrect type: {:?}, expected {:?}",
+                        &i, &self.values[i], &field.prim_value_type
+                    )));
                 }
             }
         }

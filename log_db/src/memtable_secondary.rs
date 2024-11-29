@@ -37,4 +37,8 @@ impl SecondaryMemtable {
             None => &EMPTY_SET,
         }
     }
+
+    pub fn remove(&mut self, key: &IndexableValue) -> Option<LogKeySet> {
+        self.records.remove(key)
+    }
 }

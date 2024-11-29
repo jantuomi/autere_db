@@ -19,7 +19,6 @@ use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
 pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
     data_dir: Option<String>,
@@ -312,7 +311,12 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
             {
                 let log_key = LogKey::new(segnum, index);
-                self.insert_record_to_memtables(&log_key, &record);
+
+                if record.is_tombstone() {
+                    self.remove_record_from_memtables(&record);
+                } else {
+                    self.insert_record_to_memtables(&log_key, &record);
+                }
 
                 // Update from_index in case this is the last iteration: we need to know the next
                 // index that should be read on later invocations of refresh_indexes.
@@ -346,6 +350,24 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             let sk = record.at(sk_field_index).as_indexable().unwrap();
 
             secondary_memtable.set(&sk, &log_key);
+        }
+    }
+
+    fn remove_record_from_memtables(&mut self, record: &Record) {
+        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+        self.primary_memtable.remove(&pk);
+
+        for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
+            let secondary_memtable = &mut self.secondary_memtables[sk_index];
+            let sk_field_index = self
+                .config
+                .fields
+                .iter()
+                .position(|(f, _)| sk_field == f)
+                .unwrap();
+            let sk = record.at(sk_field_index).as_indexable().unwrap();
+
+            secondary_memtable.remove(&sk);
         }
     }
 
@@ -627,6 +649,11 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         }
     }
 
+    /// Delete records by a field value.
+    pub fn delete(&mut self, field: &Field, value: &Value) -> Result<u64, DBError> {
+        todo!()
+    }
+
     /// Check if there are any pending tasks and do them. Tasks include:
     /// - Rotating the active log file if it has reached capacity and compacting it.
     ///
@@ -669,12 +696,19 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         let mut read_n = 0;
         for (original_index, item) in forward_log_reader.enumerate() {
-            let primary_key = item
+            let pk = item
                 .record
                 .at(self.primary_key_index)
                 .as_indexable()
                 .expect("Primary key was not indexable");
-            map.insert(primary_key, (original_index, item.record));
+
+            // If the record is a tombstone, remove the PK from the map
+            if item.record.is_tombstone() {
+                map.remove(&pk);
+            } else {
+                map.insert(pk, (original_index, item.record));
+            }
+
             read_n += 1;
         }
 
