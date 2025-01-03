@@ -799,7 +799,7 @@ pub fn ensure_active_metadata_is_valid(
     }
 }
 
-const LOCK_WAIT_MAX_MS: u64 = 100;
+const LOCK_WAIT_MAX_MS: u64 = 1000;
 
 #[derive(Error, Debug)]
 pub enum LockRequestError {

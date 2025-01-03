@@ -6,6 +6,7 @@ extern crate tempfile;
 use ctor::ctor;
 use env_logger;
 use log_db::*;
+use serial_test::serial;
 use std::fs::{self};
 use std::path::Path;
 use std::thread;
@@ -251,6 +252,7 @@ fn test_upsert_and_find_all() {
 }
 
 #[test]
+#[serial]
 fn test_multiple_writing_threads() {
     let data_dir = tmp_dir();
     debug!("Data dir: {:?}", data_dir);
@@ -298,6 +300,7 @@ fn test_multiple_writing_threads() {
 }
 
 #[test]
+#[serial]
 fn test_one_writer_and_multiple_reading_threads() {
     let data_dir = tmp_dir();
     let mut threads = vec![];
