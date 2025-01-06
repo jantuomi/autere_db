@@ -31,7 +31,7 @@ impl SecondaryMemtable {
         };
     }
 
-    pub fn find_all(&self, key: &IndexableValue) -> &HashSet<LogKey> {
+    pub fn find_by(&self, key: &IndexableValue) -> &HashSet<LogKey> {
         match self.records.get(key) {
             Some(set) => set.log_keys(),
             None => &EMPTY_SET,

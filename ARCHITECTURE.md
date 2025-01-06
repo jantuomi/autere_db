@@ -313,7 +313,7 @@ The following actions are performed per API function:
    b. Return record
 3. Else, return None
 
-### `find_all` (find multiple records by non-PK key)
+### `find_by` (find multiple records by non-PK key)
 
 1. (Strong) Refresh indexes
 2. If key is indexed and secondary index contains key

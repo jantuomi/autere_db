@@ -516,22 +516,44 @@ impl<R: Recordable> DB<R> {
     }
 
     /// Get a collection of records based on a field value.
-    /// Indexes will be used if they contain the requested key.
-    pub fn find_all(&mut self, field: &R::Field, query_key: &Value) -> Result<Vec<R>, DBError> {
+    /// Indexes will be used if they are applicable.
+    pub fn find_by(&mut self, field: &R::Field, value: &Value) -> Result<Vec<R>, DBError> {
+        Ok(self
+            .find_by_records(field, value)?
+            .into_iter()
+            .map(|rec| R::from_record(rec.values))
+            .collect())
+    }
+
+    fn find_by_records(&mut self, field: &R::Field, value: &Value) -> Result<Vec<Record>, DBError> {
         // If querying by primary key, return the result of `get` wrapped in a vec.
         if field == &self.config.primary_key {
-            return match self.get(query_key)? {
+            return match self.get_record(value)? {
                 Some(record) => Ok(vec![record]),
                 None => Ok(vec![]),
             };
         }
 
+        let sk_type = self
+            .config
+            .fields
+            .iter()
+            .find(|(f, _)| f == field)
+            .map(|(_, t)| t)
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Field not found in schema",
+            ))?;
+        if !type_check(&value, &sk_type) {
+            return Err(DBError::ValidationError(format!(
+                "Queried value does not match secondary key type: {:?}",
+                sk_type
+            )));
+        }
+
         // Otherwise, continue with querying secondary indexes.
-        debug!(
-            "Finding all records with field {:?} = {:?}",
-            field, query_key
-        );
-        let query_key = query_key.as_indexable().ok_or(io::Error::new(
+        debug!("Finding all records with field {:?} = {:?}", field, value);
+        let query_key = value.as_indexable().ok_or(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Queried value must be indexable",
         ))?;
@@ -542,7 +564,7 @@ impl<R: Recordable> DB<R> {
                 Some(index) => index,
                 None => {
                     return Err(DBError::ValidationError(
-                        "Cannot find_all by non-secondary key".to_owned(),
+                        "Cannot find_by by non-secondary key".to_owned(),
                     ))
                 }
             };
@@ -556,13 +578,13 @@ impl<R: Recordable> DB<R> {
             query_key
         );
         let memtable = &self.secondary_memtables[memtable_index];
-        let log_keys = memtable.find_all(&query_key);
+        let log_keys = memtable.find_by(&query_key);
 
         debug!("Found log keys in secondary memtable: {:?}", log_keys);
 
         let mut records = vec![];
         for log_key in log_keys.iter() {
-            // TODO optimize this so that a given segment is only opened once per find_all, and not for every log key
+            // TODO optimize this so that a given segment is only opened once per find_by, and not for every log key
             let segment_num = log_key.segment_num();
             let segment_index = log_key.index();
 
@@ -602,10 +624,7 @@ impl<R: Recordable> DB<R> {
             records.push(record);
         }
 
-        Ok(records
-            .into_iter()
-            .map(|rec| R::from_record(rec.values))
-            .collect())
+        Ok(records)
     }
 
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
@@ -637,17 +656,84 @@ impl<R: Recordable> DB<R> {
         }
     }
 
+    /// Delete records by a field value.
+    /// E.g. `db.delete_by(Field::Name, "John")`, assuming `Field` is the DB field type and `Field::Name` is secondary indexed.
+    /// Returns a vector of deleted records. If no records were deleted, the vector will be empty.
+    ///
+    /// Deletion is done by marking the record as a tombstone. The record will still be present in the log file,
+    /// but will be ignored by reads. Upon compaction, tombstoned records will be removed.
+    pub fn delete_by(&mut self, field: &R::Field, value: &Value) -> Result<Vec<R>, DBError> {
+        if field == &self.config.primary_key {
+            let rec = self.delete(value)?;
+            return match rec {
+                Some(rec) => Ok(vec![rec]),
+                None => Ok(vec![]),
+            };
+        }
+
+        let mut recs = self.find_by_records(field, value)?;
+        for rec in &mut recs {
+            rec.tombstone = true;
+        }
+
+        request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
+        self.active_data_file.lock_exclusive()?;
+
+        for record in &recs {
+            let record_serialized = record.serialize();
+
+            let offset = self.active_data_file.seek(SeekFrom::End(0))?;
+            let length = record_serialized.len() as u64;
+
+            self.active_data_file.write_all(&record_serialized)?;
+
+            // Flush and sync data to disk
+            if self.config.write_durability == WriteDurability::Flush {
+                self.active_data_file.flush()?;
+            }
+            if self.config.write_durability == WriteDurability::FlushSync {
+                self.active_data_file.flush()?;
+                self.active_data_file.sync_all()?;
+            }
+
+            let mut metadata_entry = vec![];
+            metadata_entry.extend(offset.to_be_bytes().iter());
+            metadata_entry.extend(length.to_be_bytes().iter());
+
+            self.active_metadata_file.write_all(&metadata_entry)?;
+
+            // Flush and sync metadata to disk
+            if self.config.write_durability == WriteDurability::Flush {
+                self.active_metadata_file.flush()?;
+            }
+            if self.config.write_durability == WriteDurability::FlushSync {
+                self.active_metadata_file.flush()?;
+                self.active_metadata_file.sync_all()?;
+            }
+
+            self.remove_record_from_memtables(&record);
+        }
+
+        self.active_metadata_file.unlock()?;
+        self.active_data_file.unlock()?;
+
+        debug!("Records deleted, returning from delete_by");
+
+        Ok(recs
+            .into_iter()
+            .map(|rec| R::from_record(rec.values))
+            .collect())
+    }
+
     /// Delete record by primary key.
     pub fn delete(&mut self, pk: &Value) -> Result<Option<R>, DBError> {
-        let record = match self.get_record(pk)? {
+        let mut record = match self.get_record(pk)? {
             Some(record) => record,
             None => return Ok(None),
         };
 
-        // The Record interface does not allow manually setting the tombstone flag,
-        // so we have to serialize the record and manually set the first byte to B_TOMBSTONE.
-        let mut record_serialized = vec![B_TOMBSTONE];
-        record_serialized.extend(&record.serialize()[1..]);
+        record.tombstone = true;
+        let record_serialized = record.serialize();
 
         request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
         self.active_data_file.lock_exclusive()?;
@@ -1074,7 +1160,7 @@ mod tests {
         // Check that the key is not indexed before write
         assert_eq!(db.primary_memtable.get(&IndexableValue::Int(0)), None);
         assert_eq!(
-            db.secondary_memtables[0].find_all(&IndexableValue::String("John".to_string())),
+            db.secondary_memtables[0].find_by(&IndexableValue::String("John".to_string())),
             &HashSet::new()
         );
 
@@ -1094,7 +1180,7 @@ mod tests {
         let mut expected_set: HashSet<LogKey> = HashSet::new();
         expected_set.insert(expected_log_key);
         assert_eq!(
-            db.secondary_memtables[0].find_all(&IndexableValue::String("John".to_string())),
+            db.secondary_memtables[0].find_by(&IndexableValue::String("John".to_string())),
             &expected_set,
         );
     }

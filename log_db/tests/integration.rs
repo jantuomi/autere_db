@@ -282,7 +282,7 @@ fn test_upsert_fails_on_invalid_value_type() {
 }
 
 #[test]
-fn test_upsert_and_find_all() {
+fn test_upsert_and_find_by() {
     let data_dir = tmp_dir();
     let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
@@ -313,7 +313,7 @@ fn test_upsert_and_find_all() {
 
     // There should be 2 Johns
     let johns = db
-        .find_all(&Field::Name, &Value::String("John".to_string()))
+        .find_by(&Field::Name, &Value::String("John".to_string()))
         .expect("Failed to find all Johns");
 
     assert_eq!(johns.len(), 2);
@@ -511,7 +511,59 @@ fn test_delete() {
 
     // Check that the secondary index is updated
     assert_eq!(
-        db.find_all(&Field::Name, &Value::String("John".to_string()))
+        db.find_by(&Field::Name, &Value::String("John".to_string()))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn test_delete_by() {
+    let data_dir = tmp_dir();
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some records
+    db.upsert(Inst {
+        id: 0,
+        name: Some("John".to_string()),
+        data: vec![3, 4, 5],
+    })
+    .unwrap();
+
+    db.upsert(Inst {
+        id: 1,
+        name: Some("John".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
+
+    db.upsert(Inst {
+        id: 2,
+        name: Some("Bob".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
+
+    db.delete_by(&Field::Name, &Value::String("John".to_string()))
+        .unwrap();
+
+    // Check that the record is deleted
+    assert!(db.get(&Value::Int(0)).unwrap().is_none());
+    assert!(db.get(&Value::Int(1)).unwrap().is_none());
+
+    // Check that the secondary index is updated
+    assert_eq!(
+        db.find_by(&Field::Name, &Value::String("John".to_string()))
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        db.find_by(&Field::Name, &Value::String("Bob".to_string()))
             .unwrap()
             .len(),
         1
