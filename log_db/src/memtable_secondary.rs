@@ -38,7 +38,41 @@ impl SecondaryMemtable {
         }
     }
 
-    pub fn remove(&mut self, key: &IndexableValue) -> Option<LogKeySet> {
+    // Remove all log keys associated with the given key
+    pub fn remove_all(&mut self, key: &IndexableValue) -> Option<LogKeySet> {
         self.records.remove(key)
+    }
+
+    // Remove a single log key associated with the given key. Returns `true`
+    // if the log key existed and was removed, `false` otherwise.
+    pub fn remove(&mut self, key: &IndexableValue, log_key: &LogKey) -> bool {
+        let set = match self.records.get_mut(key) {
+            Some(set) => set,
+            None => return false,
+        };
+        if set.len() == 1 && set.contains(log_key) {
+            self.records.remove(key);
+            true
+        } else {
+            return match set.remove(log_key) {
+                Ok(_) => true,
+                Err(LogKeySetError::NotFoundError) => false,
+                Err(e) => panic!("{:?}", e),
+            };
+        }
+    }
+
+    // Remove all log keys associated with the given log key
+    // Note: This is a linear time operation, prefer using the `remove` method
+    // if you know the secondary key associated with the log key.
+    pub fn scan_remove(&mut self, log_key: &LogKey) -> u64 {
+        let mut removed = 0;
+        self.records.iter_mut().for_each(|(_, set)| {
+            if let Ok(_) = set.remove(&log_key) {
+                removed += 1;
+            }
+        });
+
+        removed
     }
 }

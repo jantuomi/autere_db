@@ -148,6 +148,24 @@ fn test_upsert_and_get() {
 }
 
 #[test]
+fn test_get_nonexistant() {
+    let data_dir = tmp_dir();
+    let mut db = DB::configure()
+        .data_dir(&data_dir)
+        .fields(&[
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string().nullable()),
+            (Field::Data, ValueType::bytes()),
+        ])
+        .primary_key(Field::Id)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    let result = db.get(&Value::Int(0)).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
 fn test_upsert_fails_on_null_in_non_nullable_field() {
     let data_dir = tmp_dir();
     let mut db = DB::configure()
@@ -395,4 +413,48 @@ fn test_log_is_rotated_when_capacity_reached() {
 
     // 3rd segment should not exist (note negation)
     assert!(!data_dir_path.join("metadata").with_extension("3").exists());
+}
+
+#[test]
+fn test_delete() {
+    let data_dir = tmp_dir();
+    let mut db = DB::configure()
+        .data_dir(&data_dir)
+        .fields(&[
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
+        ])
+        .primary_key(Field::Id)
+        .secondary_keys(&[Field::Name])
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some records
+    let record0 = Record::from(&[
+        Value::Int(0),
+        Value::String("John".to_string()),
+        Value::Bytes(vec![3, 4, 5]),
+    ]);
+    db.upsert(&record0).unwrap();
+
+    let record1 = Record::from(&[
+        Value::Int(1),
+        Value::String("John".to_string()),
+        Value::Bytes(vec![1, 2, 3]),
+    ]);
+    db.upsert(&record1).unwrap();
+
+    db.delete(&Value::Int(0)).unwrap();
+
+    // Check that the record is deleted
+    assert!(db.get(&Value::Int(0)).unwrap().is_none());
+
+    // Check that the secondary index is updated
+    assert_eq!(
+        db.find_all(&Field::Name, &Value::String("John".to_string()))
+            .unwrap()
+            .len(),
+        1
+    );
 }

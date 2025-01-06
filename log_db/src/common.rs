@@ -26,6 +26,16 @@ pub const INIT_LOCK_FILENAME: &str = "init_lock";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const TEST_RESOURCES_DIR: &str = "tests/resources";
 
+// Serialized value tags
+pub const B_NULL: u8 = 0x0;
+pub const B_INT: u8 = 0x1;
+pub const B_FLOAT: u8 = 0x2;
+pub const B_STRING: u8 = 0x3;
+pub const B_BYTES: u8 = 0x4;
+// Tombstone marker tags
+pub const B_LIVE: u8 = 0x0;
+pub const B_TOMBSTONE: u8 = 0xFF;
+
 pub fn metadata_filename(num: u16) -> String {
     format!("metadata.{}", num)
 }
@@ -40,6 +50,14 @@ pub enum DBError {
     ConsistencyError(String),
     #[error("unexpected IO error: {0}")]
     IOError(#[from] io::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum LogKeySetError {
+    #[error("log key not found in set")]
+    NotFoundError,
+    #[error("attempted to remove last element of non-empty set")]
+    RemovingLastElementError,
 }
 
 /// LogKey is a packed struct that contains:
@@ -102,6 +120,10 @@ impl LogKeySet {
         self.set.iter()
     }
 
+    pub fn contains(&self, key: &LogKey) -> bool {
+        self.set.contains(key)
+    }
+
     /// The number of LogKeys in the set.
     pub fn len(&self) -> usize {
         self.set.len()
@@ -113,22 +135,16 @@ impl LogKeySet {
     }
 
     /// Remove a LogKey from the set. Return Ok(()) if the key was found and removed.
-    /// Return io::Error::InvalidInput if trying to remove the last element.
-    /// Return io::Error::NotFound if the key was not found.
-    pub fn remove(&mut self, key: &LogKey) -> Result<(), io::Error> {
+    /// Return `LogKeySetError::RemovingLastElementError` if trying to remove the last element.
+    /// Return `LogKeySetError::NotFoundError` if the key was not found.
+    pub fn remove(&mut self, key: &LogKey) -> Result<(), LogKeySetError> {
         if self.set.len() == 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Cannot remove the last element from LogKeySet",
-            ));
+            return Err(LogKeySetError::RemovingLastElementError);
         }
         let removed = self.set.remove(key);
 
         if !removed {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "LogKey not found in LogKeySet",
-            ));
+            return Err(LogKeySetError::NotFoundError);
         }
 
         assert!(
@@ -309,27 +325,27 @@ impl Value {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
             Value::Null => {
-                vec![0] // Tag for Null
+                vec![B_NULL]
             }
             Value::Int(i) => {
-                let mut bytes = vec![1]; // Tag for Int
+                let mut bytes = vec![B_INT];
                 bytes.extend(&i.to_be_bytes());
                 bytes
             }
             Value::Float(f) => {
-                let mut bytes = vec![2]; // Tag for Float
+                let mut bytes = vec![B_FLOAT];
                 bytes.extend(&f.to_be_bytes());
                 bytes
             }
             Value::String(s) => {
-                let mut bytes = vec![3]; // Tag for String
+                let mut bytes = vec![B_STRING];
                 let length = s.len() as u64;
                 bytes.extend(&length.to_be_bytes());
                 bytes.extend(s.as_bytes());
                 bytes
             }
             Value::Bytes(b) => {
-                let mut bytes = vec![4]; // Tag for Bytes
+                let mut bytes = vec![B_BYTES];
                 let length = b.len() as u64;
                 bytes.extend(&length.to_be_bytes());
                 bytes.extend(b);
@@ -342,18 +358,18 @@ impl Value {
     /// Returns the deserialized Value and the number of bytes consumed.
     pub fn deserialize(bytes: &[u8]) -> (Value, usize) {
         match bytes[0] {
-            0 => (Value::Null, 1),
-            1 => {
+            B_NULL => (Value::Null, 1),
+            B_INT => {
                 let mut int_bytes = [0; 8];
                 int_bytes.copy_from_slice(&bytes[1..1 + 8]);
                 (Value::Int(i64::from_be_bytes(int_bytes)), 1 + 8)
             }
-            2 => {
+            B_FLOAT => {
                 let mut float_bytes = [0; 8];
                 float_bytes.copy_from_slice(&bytes[1..1 + 8]);
                 (Value::Float(f64::from_be_bytes(float_bytes)), 1 + 8)
             }
-            3 => {
+            B_STRING => {
                 let length_bytes = &bytes[1..1 + 8];
                 let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
                 (
@@ -363,7 +379,7 @@ impl Value {
                     1 + 8 + length,
                 )
             }
-            4 => {
+            B_BYTES => {
                 let length_bytes = &bytes[1..1 + 8];
                 let length = u64::from_be_bytes(length_bytes.try_into().unwrap()) as usize;
                 (
@@ -395,9 +411,9 @@ impl Record {
         let mut bytes = Vec::new();
 
         if self.tombstone {
-            bytes.extend(&[0xFF]);
+            bytes.extend(&[B_TOMBSTONE]);
         } else {
-            bytes.extend(&[0]);
+            bytes.extend(&[B_LIVE]);
         }
 
         for value in &self.values {
@@ -409,7 +425,7 @@ impl Record {
     pub fn deserialize(bytes: &[u8]) -> Record {
         let mut values = Vec::new();
 
-        let tombstone = bytes[0] == 0xFF;
+        let tombstone = bytes[0] == B_TOMBSTONE;
 
         let mut start = 1;
         while start < bytes.len() {
