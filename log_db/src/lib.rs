@@ -247,7 +247,9 @@ impl<R: Recordable> DB<R> {
         Ok(db)
     }
 
-    fn refresh_indexes(&mut self) -> Result<(), DBError> {
+    /// Refresh the in-memory indexes from the log files.
+    /// This needs to only be called if the read consistency is set to `ReadConsistency::Eventual`.
+    pub fn refresh_indexes(&mut self) -> Result<(), DBError> {
         let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
         let active_target = fs::read_link(active_symlink_path)?;
         let active_metadata_path = self.data_dir.join(active_target);
@@ -795,8 +797,6 @@ impl<R: Recordable> DB<R> {
         }
 
         self.active_metadata_file.unlock()?;
-
-        self.refresh_indexes()?;
 
         Ok(())
     }

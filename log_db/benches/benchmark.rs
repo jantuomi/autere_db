@@ -5,30 +5,17 @@ use log_db::*;
 use tempfile;
 use utils::*;
 
-#[derive(Eq, PartialEq, Clone, Debug)]
-enum Field {
-    Id,
-    Name,
-    Data,
-}
-
 pub fn upsert_various_initial_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert_various_initial_sizes");
 
-    for size in [100, 1000, 10000, 100_000, 1_000_000, 10_000_000] {
+    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
         let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
         let data_dir = &data_dir_obj
             .path()
             .to_str()
             .expect("Failed to convert tmpdir path to str");
-        let mut db = DB::configure()
+        let mut db = DB::<Inst>::configure()
             .data_dir(&data_dir)
-            .fields(&[
-                (Field::Id, ValueType::int()),
-                (Field::Name, ValueType::string()),
-                (Field::Data, ValueType::bytes()),
-            ])
-            .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB");
 
@@ -36,8 +23,8 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
-                let record = random_record(0, size as i64 + 1);
-                let _ = db.upsert(black_box(&record));
+                let inst = random_inst(0, size as i64 + 1);
+                let _ = db.upsert(black_box(inst));
             });
         });
     }
@@ -46,25 +33,21 @@ pub fn upsert_various_initial_sizes(c: &mut Criterion) {
 pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert_various_initial_sizes_compacted");
 
-    for size in [100, 1000, 10000, 100_000, 1_000_000, 10_000_000] {
+    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
         let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
         let data_dir = &data_dir_obj
             .path()
             .to_str()
             .expect("Failed to convert tmpdir path to str");
 
-        let sample_record = random_record(0, 1);
-        let record_length = sample_record.serialize().len();
+        let record_length = 1 + // tombstone tag
+            1 + 8 +     // int tag + int value
+            1 + 8 + 5 + // string tag + string length + string value
+            1 + 8 + 10; // bytes tag + bytes length + bytes value
 
-        let mut db = DB::configure()
+        let mut db = DB::<Inst>::configure()
             .data_dir(&data_dir)
-            .fields(&[
-                (Field::Id, ValueType::int()),
-                (Field::Name, ValueType::string()),
-                (Field::Data, ValueType::bytes()),
-            ])
             .segment_size(1000 * record_length)
-            .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB");
 
@@ -73,11 +56,16 @@ pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
             .expect("Failed to do maintenance tasks");
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
+            let mut i = 0;
             b.iter(|| {
-                let record = random_record(0, size as i64 + 1);
-                let _ = db.upsert(black_box(&record));
-                db.do_maintenance_tasks()
-                    .expect("Failed to do maintenance tasks");
+                let inst = random_inst(0, size as i64 + 1);
+                let _ = db.upsert(black_box(inst));
+
+                if i % 100 == 0 {
+                    db.do_maintenance_tasks()
+                        .expect("Failed to do maintenance tasks");
+                }
+                i += 1;
             });
         });
     }
@@ -93,21 +81,15 @@ pub fn upsert_write_durability(c: &mut Criterion) {
                 .path()
                 .to_str()
                 .expect("Failed to convert tmpdir path to str");
-            let mut db = DB::configure()
+            let mut db = DB::<Inst>::configure()
                 .data_dir(&data_dir)
-                .fields(&[
-                    (Field::Id, ValueType::int()),
-                    (Field::Name, ValueType::string()),
-                    (Field::Data, ValueType::bytes()),
-                ])
                 .write_durability(mode.clone())
-                .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB");
 
             b.iter(|| {
-                let record = random_record(0, 1000);
-                let _ = db.upsert(black_box(&record));
+                let inst = random_inst(0, 1000);
+                let _ = db.upsert(black_box(inst));
             });
         });
     }
@@ -116,20 +98,14 @@ pub fn upsert_write_durability(c: &mut Criterion) {
 pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_from_disk_various_initial_sizes");
 
-    for size in [0, 10, 100, 1000, 3300, 6700, 10000, 50000, 100_000] {
+    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
         let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
         let data_dir = &data_dir_obj
             .path()
             .to_str()
             .expect("Failed to convert tmpdir path to str");
-        let mut db = DB::configure()
+        let mut db = DB::<Inst>::configure()
             .data_dir(&data_dir)
-            .fields(&[
-                (Field::Id, ValueType::int()),
-                (Field::Name, ValueType::string()),
-                (Field::Data, ValueType::bytes()),
-            ])
-            .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB");
         prefill_db(&mut db, size, false).expect("Failed to prefill DB");
@@ -146,20 +122,14 @@ pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
 pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_from_disk_various_initial_sizes_compacted");
 
-    for size in [0, 10, 100, 1000, 3300, 6700, 10000, 50000, 100_000] {
+    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
         let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
         let data_dir = &data_dir_obj
             .path()
             .to_str()
             .expect("Failed to convert tmpdir path to str");
-        let mut db = DB::configure()
+        let mut db = DB::<Inst>::configure()
             .data_dir(&data_dir)
-            .fields(&[
-                (Field::Id, ValueType::int()),
-                (Field::Name, ValueType::string()),
-                (Field::Data, ValueType::bytes()),
-            ])
-            .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB");
 

@@ -3,6 +3,57 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::fmt::Debug;
 
+#[derive(Eq, PartialEq, Clone, Debug)]
+pub enum Field {
+    Id,
+    Name,
+    Data,
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct Inst {
+    id: i64,
+    name: String,
+    data: Vec<u8>,
+}
+impl Recordable for Inst {
+    type Field = Field;
+    fn schema() -> Vec<(Field, ValueType)> {
+        vec![
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+            (Field::Data, ValueType::bytes()),
+        ]
+    }
+    fn primary_key() -> Self::Field {
+        Field::Id
+    }
+    fn into_record(self) -> Vec<Value> {
+        vec![
+            Value::Int(self.id),
+            Value::String(self.name),
+            Value::Bytes(self.data),
+        ]
+    }
+    fn from_record(record: Vec<Value>) -> Self {
+        let mut it = record.into_iter();
+        Inst {
+            id: match it.next().unwrap() {
+                Value::Int(id) => id,
+                _ => panic!("Expected Int"),
+            },
+            name: match it.next().unwrap() {
+                Value::String(name) => name,
+                _ => panic!("Expected String"),
+            },
+            data: match it.next().unwrap() {
+                Value::Bytes(data) => data,
+                _ => panic!("Expected Bytes"),
+            },
+        }
+    }
+}
+
 // Function to generate a random integer
 pub fn random_int(from: i64, to: i64) -> i64 {
     let mut rng = rand::thread_rng();
@@ -21,23 +72,19 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
     (0..len).map(|_| rng.gen()).collect()
 }
 
-// Function to generate a random record
-pub fn random_record(from_id: i64, to_id: i64) -> Record {
-    Record::from(&[
-        Value::Int(random_int(from_id, to_id)), // Random int value between 0..1000
-        Value::String(random_string(5)),        // Random string of length 5
-        Value::Bytes(random_bytes(10)),         // Random bytes of length 10
-    ])
+// Function to generate a random Inst
+pub fn random_inst(from_id: i64, to_id: i64) -> Inst {
+    Inst {
+        id: random_int(from_id, to_id), // Random int value between 0..1000
+        name: random_string(5),         // Random string of length 5
+        data: random_bytes(10),         // Random bytes of length 10
+    }
 }
 
-pub fn prefill_db<T: Eq + Clone + Debug>(
-    db: &mut DB<T>,
-    n_records: usize,
-    compact: bool,
-) -> Result<(), DBError> {
+pub fn prefill_db(db: &mut DB<Inst>, n_records: usize, compact: bool) -> Result<(), DBError> {
     for _ in 0..n_records {
-        let record = random_record(0, n_records as i64);
-        db.upsert(&record)?;
+        let inst = random_inst(0, n_records as i64);
+        db.upsert(inst)?;
         if compact {
             db.do_maintenance_tasks()?;
         }

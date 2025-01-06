@@ -216,7 +216,7 @@ impl MetadataHeader {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ReadConsistency {
     /// Reads by client A are guaranteed to see writes by themselves and any writes by other clients B
-    /// that were done before last index refresh.
+    /// that were done before last index refresh. You must call `refresh_indexes()` manually to refresh indexes.
     Eventual,
     /// Reads by client A are guaranteed to see all writes. This is slower: all reads must first
     /// refresh indexes.
