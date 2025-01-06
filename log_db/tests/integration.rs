@@ -36,16 +36,59 @@ enum Field {
     Data,
 }
 
+struct Inst {
+    pub id: i64,
+    pub name: Option<String>,
+    pub data: Vec<u8>,
+}
+
+impl Recordable for Inst {
+    type Field = Field;
+    fn schema() -> Vec<(Self::Field, ValueType)> {
+        vec![
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string().nullable()),
+            (Field::Data, ValueType::bytes()),
+        ]
+    }
+
+    fn into_record(self) -> Vec<Value> {
+        vec![
+            Value::Int(self.id),
+            match self.name {
+                Some(name) => Value::String(name),
+                None => Value::Null,
+            },
+            Value::Bytes(self.data),
+        ]
+    }
+
+    fn from_record(record: Vec<Value>) -> Self {
+        let mut it = record.into_iter();
+
+        Inst {
+            id: match it.next().unwrap() {
+                Value::Int(id) => id,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+            name: match it.next().unwrap() {
+                Value::String(name) => Some(name),
+                Value::Null => None,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+            data: match it.next().unwrap() {
+                Value::Bytes(data) => data,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+        }
+    }
+}
+
 #[test]
 fn test_initialize_only() {
     let data_dir = tmp_dir();
-    let _db = DB::configure()
+    let _db = DB::<Inst>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -54,109 +97,84 @@ fn test_initialize_only() {
 #[test]
 fn test_upsert_and_get_with_primary_memtable() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    let record = Record::from(&[
-        Value::Int(1),
-        Value::String("Alice".to_string()),
-        Value::Bytes(vec![0, 1, 2]),
-    ]);
-    db.upsert(&record).unwrap();
+    let id = 1;
+    let inst = Inst {
+        id,
+        name: Some("Alice".to_string()),
+        data: vec![0, 1, 2],
+    };
+    db.upsert(inst).unwrap();
 
     let result = db.get(&Value::Int(1)).unwrap().unwrap();
 
     // Check that the IDs match
-    assert!(match (result.at(0), record.at(0)) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        _ => false,
-    });
+    assert!(result.id == id);
 }
 
 #[test]
 fn test_upsert_and_get() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string().nullable()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
     // Insert some records
-    let record0 = Record::from(&[Value::Int(0), Value::Null, Value::Bytes(vec![3, 4, 5])]);
-    db.upsert(&record0).unwrap();
+    db.upsert(Inst {
+        id: 0,
+        name: None,
+        data: vec![3, 4, 5],
+    })
+    .unwrap();
 
-    let record1 = Record::from(&[
-        Value::Int(1),
-        Value::String("Alice".to_string()),
-        Value::Bytes(vec![0, 1, 2]),
-    ]);
-    db.upsert(&record1).unwrap();
+    db.upsert(Inst {
+        id: 1,
+        name: Some("Alice".to_string()),
+        data: vec![0, 1, 2],
+    })
+    .unwrap();
 
-    let record2 = Record::from(&[
-        Value::Int(1),
-        Value::String("Bob".to_string()),
-        Value::Bytes(vec![0, 1, 2]),
-    ]);
-    db.upsert(&record2).unwrap();
+    db.upsert(Inst {
+        id: 1,
+        name: Some("Bob".to_string()),
+        data: vec![0, 1, 2],
+    })
+    .unwrap();
 
-    let record3 = Record::from(&[
-        Value::Int(2),
-        Value::String("George".to_string()),
-        Value::Bytes(vec![]),
-    ]);
-    db.upsert(&record3).unwrap();
+    db.upsert(Inst {
+        id: 2,
+        name: Some("George".to_string()),
+        data: vec![],
+    })
+    .unwrap();
 
     // Get with ID = 0
     let result = db.get(&Value::Int(0)).unwrap().unwrap();
 
-    // Should match record0
-    assert!(match (result.at(0), record0.at(0)) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        _ => false,
-    });
-    assert!(match (result.at(1), record0.at(1)) {
-        (Value::Null, Value::Null) => true,
-        _ => false,
-    });
+    // Should match id == 0
+    assert!(result.id == 0);
+    assert!(result.name == None);
 
     // Get with ID = 1
     let result = db.get(&Value::Int(1)).unwrap().unwrap();
 
-    // Should match record2
-    assert!(match (result.at(0), record2.at(0)) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        _ => false,
-    });
-    assert!(match (result.at(1), record2.at(1)) {
-        (Value::String(a), Value::String(b)) => a == b,
-        _ => false,
-    });
+    // Should match newest inst with id == 1
+    assert!(result.id == 1);
+    assert!(result.name == Some("Bob".to_owned()));
 }
 
 #[test]
 fn test_get_nonexistant() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string().nullable()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -165,101 +183,127 @@ fn test_get_nonexistant() {
     assert!(result.is_none());
 }
 
+struct InstTestNullable {}
+impl Recordable for InstTestNullable {
+    type Field = Field;
+    fn schema() -> Vec<(Self::Field, ValueType)> {
+        vec![(Field::Id, ValueType::int())]
+    }
+
+    fn into_record(self) -> Vec<Value> {
+        vec![Value::Null]
+    }
+
+    fn from_record(_record: Vec<Value>) -> Self {
+        Self {}
+    }
+}
+
 #[test]
 fn test_upsert_fails_on_null_in_non_nullable_field() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<InstTestNullable>::configure()
         .data_dir(&data_dir)
-        .fields(&[(Field::Id, ValueType::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
     // Null value
-    let record = Record::from(&[Value::Null]);
-    assert!(db.upsert(&record).is_err());
+    assert!(db.upsert(InstTestNullable {}).is_err());
+}
+
+struct InstTestNumValues {}
+impl Recordable for InstTestNumValues {
+    type Field = Field;
+    fn schema() -> Vec<(Self::Field, ValueType)> {
+        vec![
+            (Field::Id, ValueType::int()),
+            (Field::Name, ValueType::string()),
+        ]
+    }
+
+    fn into_record(self) -> Vec<Value> {
+        vec![Value::Int(0)]
+    }
+
+    fn from_record(_record: Vec<Value>) -> Self {
+        Self {}
+    }
 }
 
 #[test]
 fn test_upsert_fails_on_invalid_number_of_values() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<InstTestNumValues>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    // Missing primary key
-    let record = Record::from(&[
-        Value::String("Alice".to_string()),
-        Value::Bytes(vec![0, 1, 2]),
-    ]);
-    assert!(db.upsert(&record).is_err());
+    // Missing values
+    assert!(db.upsert(InstTestNumValues {}).is_err());
+}
+
+struct InstTestInvalidType {}
+impl Recordable for InstTestInvalidType {
+    type Field = Field;
+    fn schema() -> Vec<(Self::Field, ValueType)> {
+        vec![(Field::Id, ValueType::int())]
+    }
+
+    fn into_record(self) -> Vec<Value> {
+        vec![Value::String("foo".to_string())]
+    }
+
+    fn from_record(_record: Vec<Value>) -> Self {
+        Self {}
+    }
 }
 
 #[test]
 fn test_upsert_fails_on_invalid_value_type() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<InstTestInvalidType>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
-    let record = Record::from(&[
-        Value::String("foo".to_string()),
-        Value::String("bar".to_string()),
-        Value::String("baz".to_string()),
-    ]);
-    assert!(db.upsert(&record).is_err());
+    // Invalid type
+    assert!(db.upsert(InstTestInvalidType {}).is_err());
 }
 
 #[test]
 fn test_upsert_and_find_all() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .secondary_keys(&[Field::Name])
         .initialize()
         .expect("Failed to initialize DB instance");
 
     // Insert some records
-    let record0 = Record::from(&[
-        Value::Int(0),
-        Value::String("John".to_string()),
-        Value::Bytes(vec![3, 4, 5]),
-    ]);
-    db.upsert(&record0).unwrap();
+    db.upsert(Inst {
+        id: 0,
+        name: Some("John".to_string()),
+        data: vec![3, 4, 5],
+    })
+    .unwrap();
 
-    let record1 = Record::from(&[
-        Value::Int(1),
-        Value::String("John".to_string()),
-        Value::Bytes(vec![1, 2, 3]),
-    ]);
-    db.upsert(&record1).unwrap();
+    db.upsert(Inst {
+        id: 1,
+        name: Some("John".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
 
-    let record2 = Record::from(&[
-        Value::Int(2),
-        Value::String("George".to_string()),
-        Value::Bytes(vec![1, 2, 3]),
-    ]);
-    db.upsert(&record2).unwrap();
+    db.upsert(Inst {
+        id: 2,
+        name: Some("George".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
 
     // There should be 2 Johns
     let johns = db
@@ -267,6 +311,30 @@ fn test_upsert_and_find_all() {
         .expect("Failed to find all Johns");
 
     assert_eq!(johns.len(), 2);
+}
+
+struct InstSingleId {
+    pub id: i64,
+}
+
+impl Recordable for InstSingleId {
+    type Field = Field;
+    fn schema() -> Vec<(Self::Field, ValueType)> {
+        vec![(Field::Id, ValueType::int())]
+    }
+
+    fn into_record(self) -> Vec<Value> {
+        vec![Value::Int(self.id)]
+    }
+
+    fn from_record(record: Vec<Value>) -> Self {
+        Self {
+            id: match record[0] {
+                Value::Int(id) => id,
+                _ => panic!("Invalid value type"),
+            },
+        }
+    }
 }
 
 #[test]
@@ -280,15 +348,14 @@ fn test_multiple_writing_threads() {
     for i in 0..threads_n {
         let data_dir = data_dir.clone();
         threads.push(thread::spawn(move || {
-            let mut db = DB::configure()
+            let mut db = DB::<InstSingleId>::configure()
                 .data_dir(&data_dir)
-                .fields(&[(Field::Id, ValueType::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
 
-            let record = Record::from(&[Value::Int(i)]);
-            db.upsert(&record).expect("Failed to upsert record");
+            db.upsert(InstSingleId { id: i })
+                .expect("Failed to upsert record");
         }));
     }
 
@@ -297,9 +364,8 @@ fn test_multiple_writing_threads() {
     }
 
     // Read the records
-    let mut db = DB::configure()
+    let mut db = DB::<InstSingleId>::configure()
         .data_dir(&data_dir)
-        .fields(&[(Field::Id, ValueType::int())])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -310,10 +376,7 @@ fn test_multiple_writing_threads() {
             .expect("Failed to get record")
             .expect("Record not found");
 
-        assert!(match &result.values() {
-            [Value::Int(a)] => a == &i,
-            _ => false,
-        });
+        assert!(result.id == i);
     }
 }
 
@@ -328,10 +391,9 @@ fn test_one_writer_and_multiple_reading_threads() {
     for i in 0..threads_n {
         let data_dir = data_dir.clone();
         threads.push(thread::spawn(move || {
-            let mut db = DB::configure()
+            let mut db = DB::<InstSingleId>::configure()
                 .data_dir(&data_dir)
                 .segment_size(1000) // should cause rotations
-                .fields(&[(Field::Id, ValueType::int())])
                 .primary_key(Field::Id)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -346,10 +408,7 @@ fn test_one_writer_and_multiple_reading_threads() {
                         continue;
                     }
                     Some(result) => {
-                        assert!(match &result.values() {
-                            [Value::Int(a)] => a == &i,
-                            _ => false,
-                        });
+                        assert!(result.id == i);
                         break;
                     }
                 };
@@ -359,16 +418,15 @@ fn test_one_writer_and_multiple_reading_threads() {
 
     // Add a writer that inserts the records
     threads.push(thread::spawn(move || {
-        let mut db = DB::configure()
+        let mut db = DB::<InstSingleId>::configure()
             .data_dir(&data_dir)
-            .fields(&[(Field::Id, ValueType::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to initialize DB instance");
 
         for i in 0..threads_n {
-            let record = Record::from(&[Value::Int(i)]);
-            db.upsert(&record).expect("Failed to upsert record");
+            db.upsert(InstSingleId { id: i })
+                .expect("Failed to upsert record");
 
             db.do_maintenance_tasks() // Run maintenance tasks after every write, just to test it
                 .expect("Failed to do maintenance tasks");
@@ -385,23 +443,27 @@ fn test_log_is_rotated_when_capacity_reached() {
     let data_dir = tmp_dir();
     let data_dir_path = Path::new(&data_dir);
 
-    let record = Record::from(&[Value::Int(1), Value::Bytes(vec![1, 2, 3, 4])]);
-    let record_len = &record.serialize().len();
+    // Hand-calculated record length, find record below
+    let record_len = 1 // tombstone tag
+        + (1 + 8)      // int tag + i64
+        + (1 + 8 + 4)  // string tag + string length + string data
+        + (1 + 8 + 3); // bytes tag + bytes length + bytes data
 
-    let mut db = DB::configure()
+    let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
         .segment_size(10 * record_len) // small log segment size
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .initialize()
         .expect("Failed to initialize DB instance");
 
     // Insert more records than fits the capacity
     for _ in 0..25 {
-        db.upsert(&record).expect("Failed to upsert record");
+        db.upsert(Inst {
+            id: 0,
+            name: Some("John".to_string()),
+            data: vec![3, 4, 5],
+        })
+        .expect("Failed to upsert record");
 
         db.do_maintenance_tasks()
             .expect("Failed to do maintenance tasks");
@@ -418,32 +480,27 @@ fn test_log_is_rotated_when_capacity_reached() {
 #[test]
 fn test_delete() {
     let data_dir = tmp_dir();
-    let mut db = DB::configure()
+    let mut db = DB::<Inst>::configure()
         .data_dir(&data_dir)
-        .fields(&[
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
-        ])
         .primary_key(Field::Id)
         .secondary_keys(&[Field::Name])
         .initialize()
         .expect("Failed to initialize DB instance");
 
     // Insert some records
-    let record0 = Record::from(&[
-        Value::Int(0),
-        Value::String("John".to_string()),
-        Value::Bytes(vec![3, 4, 5]),
-    ]);
-    db.upsert(&record0).unwrap();
+    db.upsert(Inst {
+        id: 0,
+        name: Some("John".to_string()),
+        data: vec![3, 4, 5],
+    })
+    .unwrap();
 
-    let record1 = Record::from(&[
-        Value::Int(1),
-        Value::String("John".to_string()),
-        Value::Bytes(vec![1, 2, 3]),
-    ]);
-    db.upsert(&record1).unwrap();
+    db.upsert(Inst {
+        id: 1,
+        name: Some("John".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
 
     db.delete(&Value::Int(0)).unwrap();
 

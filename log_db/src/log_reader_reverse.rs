@@ -1,4 +1,5 @@
 use super::common::*;
+use super::record::*;
 use std::fs::{self};
 use std::io::{self, Read, Seek};
 
@@ -97,7 +98,7 @@ mod tests {
         let last_record = reverse_log_reader
             .next()
             .expect("Failed to read the last record");
-        assert!(match last_record.values() {
+        assert!(match &last_record.values[..] {
             [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });

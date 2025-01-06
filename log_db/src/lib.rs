@@ -1,11 +1,13 @@
 #[macro_use]
 extern crate log;
 
+#[macro_use]
 mod common;
 mod log_reader_forward;
 mod log_reader_reverse;
 mod memtable_primary;
 mod memtable_secondary;
+mod record;
 
 pub use common::*;
 use fs2::FileExt;
@@ -14,28 +16,28 @@ use log_reader_forward::ForwardLogReaderItem;
 pub use log_reader_reverse::ReverseLogReader;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
+pub use record::Recordable;
+use record::*;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-pub struct ConfigBuilder<Field: Eq + Clone + Debug> {
+pub struct ConfigBuilder<R: Recordable> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
-    fields: Option<Vec<(Field, ValueType)>>,
-    primary_key: Option<Field>,
-    secondary_keys: Option<Vec<Field>>,
+    primary_key: Option<R::Field>,
+    secondary_keys: Option<Vec<R::Field>>,
     write_durability: Option<WriteDurability>,
     read_consistency: Option<ReadConsistency>,
 }
 
-impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
-    pub fn new() -> ConfigBuilder<Field> {
-        ConfigBuilder::<Field> {
+impl<'a, R: Recordable> ConfigBuilder<R> {
+    pub fn new() -> ConfigBuilder<R> {
+        ConfigBuilder::<R> {
             data_dir: None,
             segment_size: None,
-            fields: None,
             primary_key: None,
             secondary_keys: None,
             write_durability: None,
@@ -58,23 +60,17 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         self
     }
 
-    /// The field schema of the database.
-    pub fn fields(&mut self, fields: &[(Field, ValueType)]) -> &mut Self {
-        self.fields = Some(fields.to_vec());
-        self
-    }
-
     /// The primary key of the database, used to construct
     /// the primary memtable index. This should be the field
     /// that is most frequently queried.
-    pub fn primary_key(&mut self, primary_key: Field) -> &mut Self {
+    pub fn primary_key(&mut self, primary_key: R::Field) -> &mut Self {
         self.primary_key = Some(primary_key);
         self
     }
 
     /// The secondary keys of the database, used to construct
     /// the secondary memtable indexes.
-    pub fn secondary_keys(&mut self, secondary_keys: &[Field]) -> &mut Self {
+    pub fn secondary_keys(&mut self, secondary_keys: &[R::Field]) -> &mut Self {
         self.secondary_keys = Some(secondary_keys.to_vec());
         self
     }
@@ -96,18 +92,11 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
         self
     }
 
-    pub fn initialize(&self) -> Result<DB<Field>, DBError> {
-        let config = Config::<Field> {
+    pub fn initialize(&self) -> Result<DB<R>, DBError> {
+        let config = Config::<R> {
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
             segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
-            fields: self
-                .fields
-                .as_ref()
-                .ok_or(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Required config value \"fields\" is not set",
-                ))?
-                .clone(),
+            fields: R::schema(),
             primary_key: self.primary_key.clone().ok_or(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Required config value \"primary_key\" is not set",
@@ -123,23 +112,23 @@ impl<'a, Field: Eq + Clone + Debug> ConfigBuilder<Field> {
                 .unwrap_or(ReadConsistency::Strong),
         };
 
-        DB::initialize(&config)
+        DB::initialize(config)
     }
 }
 
 #[derive(Clone)]
-struct Config<Field: Eq + Clone> {
+struct Config<R: Recordable> {
     pub data_dir: String,
     pub segment_size: usize,
-    pub fields: Vec<(Field, ValueType)>,
-    pub primary_key: Field,
-    pub secondary_keys: Vec<Field>,
+    pub fields: Vec<(R::Field, ValueType)>,
+    pub primary_key: R::Field,
+    pub secondary_keys: Vec<R::Field>,
     pub write_durability: WriteDurability,
     pub read_consistency: ReadConsistency,
 }
 
-pub struct DB<Field: Eq + Clone + Debug> {
-    config: Config<Field>,
+pub struct DB<R: Recordable> {
+    config: Config<R>,
     data_dir: PathBuf,
     active_metadata_file: fs::File,
     active_data_file: fs::File,
@@ -149,13 +138,13 @@ pub struct DB<Field: Eq + Clone + Debug> {
     refresh_next_logkey: LogKey,
 }
 
-impl<Field: Eq + Clone + Debug> DB<Field> {
+impl<R: Recordable> DB<R> {
     /// Create a new database configuration builder.
-    pub fn configure() -> ConfigBuilder<Field> {
+    pub fn configure() -> ConfigBuilder<R> {
         ConfigBuilder::new()
     }
 
-    fn initialize(config: &Config<Field>) -> Result<DB<Field>, DBError> {
+    fn initialize(config: Config<R>) -> Result<DB<R>, DBError> {
         info!("Initializing DB...");
         // If data_dir does not exist or is empty, create it and any necessary files
         // After creation, the directory should always be in a complete state
@@ -163,8 +152,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         // A tempdir-move strategy is used to achieve one-phase commit.
 
         // Ensure the data directory exists
-        let data_dir_path = Path::new(&config.data_dir);
-        match fs::create_dir(&data_dir_path) {
+        let data_dir = Path::new(&config.data_dir).to_path_buf();
+        match fs::create_dir(&data_dir) {
             Ok(_) => {}
             Err(e) => {
                 if e.kind() != io::ErrorKind::AlreadyExists {
@@ -177,22 +166,22 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         let init_lock_file = fs::OpenOptions::new()
             .create(true)
             .write(true)
-            .open(&data_dir_path.join(INIT_LOCK_FILENAME))?;
+            .open(&data_dir.join(INIT_LOCK_FILENAME))?;
 
         init_lock_file.lock_exclusive()?;
 
         // We have acquired the lock, check if the data directory is in a complete state
         // If not, initialize it, otherwise skip.
-        if !fs::exists(data_dir_path.join(ACTIVE_SYMLINK_FILENAME))? {
-            let (segment_uuid, _) = create_segment_data_file(data_dir_path)?;
-            let (segment_num, _) = create_segment_metadata_file(data_dir_path, &segment_uuid)?;
-            set_active_segment(data_dir_path, segment_num)?;
+        if !fs::exists(data_dir.join(ACTIVE_SYMLINK_FILENAME))? {
+            let (segment_uuid, _) = create_segment_data_file(&data_dir)?;
+            let (segment_num, _) = create_segment_metadata_file(&data_dir, &segment_uuid)?;
+            set_active_segment(&data_dir, segment_num)?;
 
             // Create the exclusive lock request file
             fs::OpenOptions::new()
                 .create(true)
                 .write(true)
-                .open(data_dir_path.join(EXCL_LOCK_REQUEST_FILENAME))?;
+                .open(data_dir.join(EXCL_LOCK_REQUEST_FILENAME))?;
         }
 
         init_lock_file.unlock()?;
@@ -257,9 +246,9 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = APPEND_MODE.open(&active_data_path)?;
 
-        let mut db = DB::<Field> {
-            config: config.clone(),
-            data_dir: data_dir_path.to_path_buf(),
+        let mut db = DB::<R> {
+            config,
+            data_dir,
             active_metadata_file,
             active_data_file,
             primary_key_index,
@@ -312,7 +301,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             {
                 let log_key = LogKey::new(segnum, index);
 
-                if record.is_tombstone() {
+                if record.tombstone {
                     self.remove_record_from_memtables(&record);
                 } else {
                     self.insert_record_to_memtables(&log_key, &record);
@@ -374,12 +363,17 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Insert a record into the database. If the primary key value already exists,
     /// the existing record will be replaced by the supplied one.
-    pub fn upsert(&mut self, record: &Record) -> Result<(), DBError> {
+    pub fn upsert(&mut self, recordable: R) -> Result<(), DBError> {
+        let record = Record::from(&recordable.into_record());
         debug!("Upserting record: {:?}", record);
 
         record.validate(&self.config.fields)?;
-
         debug!("Record is valid");
+
+        self.upsert_record(&record)
+    }
+
+    fn upsert_record(&mut self, record: &Record) -> Result<(), DBError> {
         debug!("Opening file in append mode and acquiring exclusive lock...");
 
         // Acquire an exclusive lock for writing
@@ -390,7 +384,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         {
             // The log file has been rotated, so we must try again
             self.active_metadata_file.unlock()?;
-            return self.upsert(record);
+            return self.upsert_record(record);
         }
 
         self.active_data_file.lock_exclusive()?;
@@ -462,7 +456,13 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
-    pub fn get(&mut self, query_key: &Value) -> Result<Option<Record>, DBError> {
+    pub fn get(&mut self, query_key: &Value) -> Result<Option<R>, DBError> {
+        Ok(self
+            .get_record(query_key)?
+            .map(|rec| R::from_record(rec.values)))
+    }
+
+    fn get_record(&mut self, query_key: &Value) -> Result<Option<Record>, DBError> {
         let pk_type = &self.config.fields[self.primary_key_index].1;
         if !type_check(&query_key, &pk_type) {
             return Err(DBError::ValidationError(format!(
@@ -530,16 +530,16 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
         );
 
         let record = Record::deserialize(&data_buf);
-        return Ok(Some(record));
+        Ok(Some(record))
     }
 
     /// Get a collection of records based on a field value.
     /// Indexes will be used if they contain the requested key.
-    pub fn find_all(&mut self, field: &Field, query_key: &Value) -> Result<Vec<Record>, DBError> {
+    pub fn find_all(&mut self, field: &R::Field, query_key: &Value) -> Result<Vec<R>, DBError> {
         // If querying by primary key, return the result of `get` wrapped in a vec.
         if field == &self.config.primary_key {
             return match self.get(query_key)? {
-                Some(record) => Ok(vec![record.clone()]),
+                Some(record) => Ok(vec![record]),
                 None => Ok(vec![]),
             };
         }
@@ -620,7 +620,10 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
             records.push(record);
         }
 
-        Ok(records)
+        Ok(records
+            .into_iter()
+            .map(|rec| R::from_record(rec.values))
+            .collect())
     }
 
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
@@ -653,8 +656,8 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
     }
 
     /// Delete record by primary key.
-    pub fn delete(&mut self, pk: &Value) -> Result<Option<Record>, DBError> {
-        let record = match self.get(pk)? {
+    pub fn delete(&mut self, pk: &Value) -> Result<Option<R>, DBError> {
+        let record = match self.get_record(pk)? {
             Some(record) => record,
             None => return Ok(None),
         };
@@ -703,7 +706,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
 
         debug!("Record deleted, returning from delete");
 
-        Ok(Some(record))
+        Ok(Some(R::from_record(record.values)))
     }
 
     /// Check if there are any pending tasks and do them. Tasks include:
@@ -755,7 +758,7 @@ impl<Field: Eq + Clone + Debug> DB<Field> {
                 .expect("Primary key was not indexable");
 
             // If the record is a tombstone, remove the PK from the map
-            if item.record.is_tombstone() {
+            if item.record.tombstone {
                 map.remove(&pk);
             } else {
                 map.insert(pk, (original_index, item.record));
@@ -870,6 +873,66 @@ mod tests {
         Name,
     }
 
+    struct TestInst1 {
+        id: i64,
+    }
+
+    impl Recordable for TestInst1 {
+        type Field = Field;
+
+        fn into_record(self) -> Vec<Value> {
+            vec![Value::Int(self.id)]
+        }
+
+        fn from_record(record: Vec<Value>) -> Self {
+            let mut it = record.into_iter();
+            TestInst1 {
+                id: match it.next().unwrap() {
+                    Value::Int(i) => i,
+                    _ => panic!("Expected int"),
+                },
+            }
+        }
+
+        fn schema() -> Vec<(Field, ValueType)> {
+            vec![(Field::Id, ValueType::int())]
+        }
+    }
+
+    struct TestInst2 {
+        id: i64,
+        name: String,
+    }
+
+    impl Recordable for TestInst2 {
+        type Field = Field;
+
+        fn into_record(self) -> Vec<Value> {
+            vec![Value::Int(self.id), Value::String(self.name)]
+        }
+
+        fn from_record(record: Vec<Value>) -> Self {
+            let mut it = record.into_iter();
+            TestInst2 {
+                id: match it.next().unwrap() {
+                    Value::Int(i) => i,
+                    _ => panic!("Expected int"),
+                },
+                name: match it.next().unwrap() {
+                    Value::String(s) => s,
+                    _ => panic!("Expected string"),
+                },
+            }
+        }
+
+        fn schema() -> Vec<(Field, ValueType)> {
+            vec![
+                (Field::Id, ValueType::int()),
+                (Field::Name, ValueType::string()),
+            ]
+        }
+    }
+
     #[test]
     fn test_compaction() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -878,18 +941,17 @@ mod tests {
 
         let capacity = 5;
         let segment_size = capacity * 2 * 8 + METADATA_FILE_HEADER_SIZE;
-        let mut db = DB::configure()
+        let mut db = DB::<TestInst1>::configure()
             .data_dir(data_dir.to_str().unwrap())
             .segment_size(segment_size)
-            .fields(&[(Field::Id, ValueType::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to create DB");
 
         // Insert records with same value until we reach the capacity
         for _ in 0..capacity {
-            let record = Record::from(&[Value::Int(0 as i64)]);
-            db.upsert(&record).expect("Failed to insert record");
+            db.upsert(TestInst1 { id: 0 })
+                .expect("Failed to insert record");
         }
 
         let mut segment1_file = READ_MODE.open(data_dir.join(metadata_filename(1))).unwrap();
@@ -906,8 +968,8 @@ mod tests {
             .expect("Failed to do maintenance tasks");
 
         // Insert one extra with different value, this goes into another segment
-        let record = Record::from(&[Value::Int(1 as i64)]);
-        db.upsert(&record).expect("Failed to insert record");
+        db.upsert(TestInst1 { id: 1 })
+            .expect("Failed to insert record");
 
         // Check that rotation resulted in 2 segments
         assert!(fs::exists(data_dir.join(metadata_filename(1))).unwrap());
@@ -943,25 +1005,19 @@ mod tests {
         );
 
         // Check that the records can be read
-        let rec0 = db
+        let inst0 = db
             .get(&Value::Int(0 as i64))
             .expect("Failed to get record")
             .expect("Record not found");
 
-        assert!(match rec0.at(0) {
-            Value::Int(0) => true,
-            _ => false,
-        });
+        assert!(inst0.id == 0);
 
-        let rec1 = db
+        let inst1 = db
             .get(&Value::Int(1 as i64))
             .expect("Failed to get record")
             .expect("Record not found");
 
-        assert!(match rec1.at(0) {
-            Value::Int(1) => true,
-            _ => false,
-        });
+        assert!(inst1.id == 1);
     }
 
     #[test]
@@ -970,18 +1026,17 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
-        let mut db = DB::configure()
+        let mut db = DB::<TestInst1>::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .fields(&[(Field::Id, ValueType::int())])
             .primary_key(Field::Id)
             .initialize()
             .expect("Failed to create DB");
 
         // Insert records
-        let n_recs = 100;
+        let n_recs: u64 = 100;
         for i in 0..n_recs {
-            let record = Record::from(&[Value::Int(i as i64)]);
-            db.upsert(&record).expect("Failed to insert record");
+            db.upsert(TestInst1 { id: i as i64 })
+                .expect("Failed to insert record");
         }
 
         // Open the segment file and write garbage to it to simulate corruption
@@ -1023,12 +1078,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
-        let mut db = DB::configure()
+        let mut db = DB::<TestInst2>::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .fields(&[
-                (Field::Id, ValueType::int()),
-                (Field::Name, ValueType::string()),
-            ])
             .primary_key(Field::Id)
             .secondary_keys(&[Field::Name])
             .initialize()
@@ -1042,8 +1093,11 @@ mod tests {
         );
 
         // Insert record
-        let record = Record::from(&[Value::Int(0), Value::String("John".to_string())]);
-        db.upsert(&record).expect("Failed to insert record");
+        db.upsert(TestInst2 {
+            id: 0,
+            name: "John".to_owned(),
+        })
+        .expect("Failed to insert record");
 
         // Check that the key is now indexed
         let expected_log_key = LogKey::new(1, 0);

@@ -400,114 +400,6 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Record {
-    values: Vec<Value>,
-    tombstone: bool,
-}
-
-impl Record {
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        if self.tombstone {
-            bytes.extend(&[B_TOMBSTONE]);
-        } else {
-            bytes.extend(&[B_LIVE]);
-        }
-
-        for value in &self.values {
-            bytes.extend(value.serialize());
-        }
-        bytes
-    }
-
-    pub fn deserialize(bytes: &[u8]) -> Record {
-        let mut values = Vec::new();
-
-        let tombstone = bytes[0] == B_TOMBSTONE;
-
-        let mut start = 1;
-        while start < bytes.len() {
-            let (rv, consumed) = Value::deserialize(&bytes[start..]);
-            values.push(rv);
-            start += consumed;
-        }
-        Record { values, tombstone }
-    }
-
-    pub fn from(values: &[Value]) -> Record {
-        Record {
-            values: values.to_vec(),
-            tombstone: false,
-        }
-    }
-
-    pub fn values(&self) -> &[Value] {
-        &self.values
-    }
-
-    pub fn at(&self, index: usize) -> &Value {
-        &self.values[index]
-    }
-
-    pub fn is_tombstone(&self) -> bool {
-        self.tombstone
-    }
-
-    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> Result<(), DBError> {
-        // Validate the record length
-        if self.values.len() != schema.len() {
-            return Err(DBError::ValidationError(format!(
-                "Record has an incorrect number of fields: {}, expected {}",
-                self.values.len(),
-                schema.len()
-            )));
-        }
-
-        // Validate that record fields match schema types
-        for (i, (_, field)) in schema.iter().enumerate() {
-            match (&self.values[i], field) {
-                (
-                    Value::Null,
-                    ValueType {
-                        nullable: true,
-                        prim_value_type: _,
-                    },
-                ) => {}
-                (
-                    Value::Int(_),
-                    ValueType {
-                        prim_value_type: PrimValueType::Int,
-                        ..
-                    },
-                ) => {}
-                (
-                    Value::String(_),
-                    ValueType {
-                        prim_value_type: PrimValueType::String,
-                        ..
-                    },
-                ) => {}
-                (
-                    Value::Bytes(_),
-                    ValueType {
-                        prim_value_type: PrimValueType::Bytes,
-                        ..
-                    },
-                ) => {}
-                _ => {
-                    return Err(DBError::ValidationError(format!(
-                        "Record field {} has incorrect type: {:?}, expected {:?}",
-                        &i, &self.values[i], &field.prim_value_type
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 pub fn type_check(value: &Value, value_type: &ValueType) -> bool {
     match (value, value_type) {
         (
@@ -541,14 +433,6 @@ pub fn type_check(value: &Value, value_type: &ValueType) -> bool {
         (Value::Null, ValueType { nullable: true, .. }) => true,
         _ => false,
     }
-}
-
-/// A trait that describes how to convert a data structure into a database `Record` and vice versa.
-pub trait Recordable {
-    /// Convert the data structure implementing the `Recordable` trait into a database `Record`.
-    fn to_record(&self) -> Record;
-    /// Convert a database `Record` into the data structure implementing the `Recordable` trait.
-    fn from_record(record: &Record) -> Self;
 }
 
 pub fn get_secondary_memtable_index_by_field<Field: Eq>(
@@ -897,4 +781,14 @@ pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> Result<()
     lock_request_file.unlock()?;
 
     Ok(())
+}
+
+macro_rules! dbg_trace {
+    ($($args: expr),*) => {
+        print!("TRACE: file: {}, line: {}", file!(), line!());
+        $(
+            print!(", {}: {:?}", stringify!($args), $args);
+        )*
+        println!(""); // to get a new line at the end
+    }
 }

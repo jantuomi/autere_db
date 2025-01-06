@@ -1,4 +1,5 @@
 use super::common::*;
+use super::record::*;
 use std::fs::{self};
 use std::io::{self, Read, Seek};
 
@@ -120,7 +121,7 @@ mod tests {
         let first_record = forward_log_reader
             .next()
             .expect("Failed to read the first record");
-        assert!(match first_record.record.values() {
+        assert!(match &first_record.record.values[..] {
             [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });
