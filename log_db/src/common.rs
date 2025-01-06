@@ -242,6 +242,7 @@ impl Display for WriteDurability {
 
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum IndexableValue {
+    Null,
     Int(i64),
     String(String),
 }
@@ -393,6 +394,7 @@ impl Value {
 
     pub fn as_indexable(&self) -> Option<IndexableValue> {
         match self {
+            Value::Null => Some(IndexableValue::Null),
             Value::Int(i) => Some(IndexableValue::Int(*i)),
             Value::String(s) => Some(IndexableValue::String(s.clone())),
             _ => None,

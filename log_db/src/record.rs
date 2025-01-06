@@ -104,8 +104,15 @@ impl Record {
 pub trait Recordable {
     /// The field type of the data structure implementing the `Recordable` trait.
     type Field: Eq + Clone + Debug;
-    /// Define the schema of the data structure implementing the `Recordable` trait.
+    /// Define the schema of the instance implementing the `Recordable` trait.
     fn schema() -> Vec<(Self::Field, ValueType)>;
+    /// Define the primary key of the instance implementing the `Recordable` trait.
+    fn primary_key() -> Self::Field;
+    /// Define the secondary keys of the instance implementing the `Recordable` trait.
+    fn secondary_keys() -> Vec<Self::Field> {
+        Vec::new()
+    }
+
     /// Convert the data structure implementing the `Recordable` trait into a vector of database values.
     fn into_record(self) -> Vec<Value>;
     /// Convert a vector of database values into the data structure implementing the `Recordable` trait.

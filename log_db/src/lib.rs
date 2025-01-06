@@ -22,26 +22,25 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 pub struct ConfigBuilder<R: Recordable> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
-    primary_key: Option<R::Field>,
-    secondary_keys: Option<Vec<R::Field>>,
     write_durability: Option<WriteDurability>,
     read_consistency: Option<ReadConsistency>,
+    _marker: PhantomData<R>,
 }
 
-impl<'a, R: Recordable> ConfigBuilder<R> {
+impl<R: Recordable> ConfigBuilder<R> {
     pub fn new() -> ConfigBuilder<R> {
-        ConfigBuilder::<R> {
+        ConfigBuilder {
             data_dir: None,
             segment_size: None,
-            primary_key: None,
-            secondary_keys: None,
             write_durability: None,
             read_consistency: None,
+            _marker: PhantomData,
         }
     }
 
@@ -57,21 +56,6 @@ impl<'a, R: Recordable> ConfigBuilder<R> {
     /// the segment file may continue to grow.
     pub fn segment_size(&mut self, segment_size: usize) -> &mut Self {
         self.segment_size = Some(segment_size);
-        self
-    }
-
-    /// The primary key of the database, used to construct
-    /// the primary memtable index. This should be the field
-    /// that is most frequently queried.
-    pub fn primary_key(&mut self, primary_key: R::Field) -> &mut Self {
-        self.primary_key = Some(primary_key);
-        self
-    }
-
-    /// The secondary keys of the database, used to construct
-    /// the secondary memtable indexes.
-    pub fn secondary_keys(&mut self, secondary_keys: &[R::Field]) -> &mut Self {
-        self.secondary_keys = Some(secondary_keys.to_vec());
         self
     }
 
@@ -93,15 +77,12 @@ impl<'a, R: Recordable> ConfigBuilder<R> {
     }
 
     pub fn initialize(&self) -> Result<DB<R>, DBError> {
-        let config = Config::<R> {
+        let config = Config {
+            fields: R::schema(),
+            primary_key: R::primary_key(),
+            secondary_keys: R::secondary_keys(),
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
             segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
-            fields: R::schema(),
-            primary_key: self.primary_key.clone().ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Required config value \"primary_key\" is not set",
-            ))?,
-            secondary_keys: self.secondary_keys.clone().unwrap_or(Vec::new()),
             write_durability: self
                 .write_durability
                 .clone()
@@ -118,17 +99,18 @@ impl<'a, R: Recordable> ConfigBuilder<R> {
 
 #[derive(Clone)]
 struct Config<R: Recordable> {
-    pub data_dir: String,
-    pub segment_size: usize,
     pub fields: Vec<(R::Field, ValueType)>,
     pub primary_key: R::Field,
     pub secondary_keys: Vec<R::Field>,
+    pub data_dir: String,
+    pub segment_size: usize,
     pub write_durability: WriteDurability,
     pub read_consistency: ReadConsistency,
 }
 
 pub struct DB<R: Recordable> {
     config: Config<R>,
+
     data_dir: PathBuf,
     active_metadata_file: fs::File,
     active_data_file: fs::File,
@@ -879,6 +861,12 @@ mod tests {
 
     impl Recordable for TestInst1 {
         type Field = Field;
+        fn schema() -> Vec<(Field, ValueType)> {
+            vec![(Field::Id, ValueType::int())]
+        }
+        fn primary_key() -> Self::Field {
+            Field::Id
+        }
 
         fn into_record(self) -> Vec<Value> {
             vec![Value::Int(self.id)]
@@ -893,10 +881,6 @@ mod tests {
                 },
             }
         }
-
-        fn schema() -> Vec<(Field, ValueType)> {
-            vec![(Field::Id, ValueType::int())]
-        }
     }
 
     struct TestInst2 {
@@ -906,6 +890,12 @@ mod tests {
 
     impl Recordable for TestInst2 {
         type Field = Field;
+        fn primary_key() -> Self::Field {
+            Field::Id
+        }
+        fn secondary_keys() -> Vec<Self::Field> {
+            vec![Field::Name]
+        }
 
         fn into_record(self) -> Vec<Value> {
             vec![Value::Int(self.id), Value::String(self.name)]
@@ -944,7 +934,6 @@ mod tests {
         let mut db = DB::<TestInst1>::configure()
             .data_dir(data_dir.to_str().unwrap())
             .segment_size(segment_size)
-            .primary_key(Field::Id)
             .initialize()
             .expect("Failed to create DB");
 
@@ -1028,7 +1017,6 @@ mod tests {
 
         let mut db = DB::<TestInst1>::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .primary_key(Field::Id)
             .initialize()
             .expect("Failed to create DB");
 
@@ -1080,8 +1068,6 @@ mod tests {
 
         let mut db = DB::<TestInst2>::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .primary_key(Field::Id)
-            .secondary_keys(&[Field::Name])
             .initialize()
             .expect("Failed to create DB");
 
