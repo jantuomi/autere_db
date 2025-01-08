@@ -23,6 +23,8 @@ impl Record {
     }
 
     pub fn deserialize(bytes: &[u8]) -> Record {
+        assert!(bytes.len() > 0);
+
         let mut values = Vec::new();
 
         let tombstone = bytes[0] == B_TOMBSTONE;

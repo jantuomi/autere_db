@@ -104,22 +104,6 @@ impl LogKeySet {
         LogKeySet { set }
     }
 
-    pub fn from_slice(keys: &[LogKey]) -> Self {
-        assert!(
-            !keys.is_empty(),
-            "LogKeySet::from_slice must be supplied a non-empty slice"
-        );
-        let mut set = HashSet::with_capacity(keys.len());
-        keys.iter().for_each(|key| {
-            set.insert(key.clone());
-        });
-        LogKeySet { set }
-    }
-
-    pub fn iter(&self) -> std::collections::hash_set::Iter<'_, LogKey> {
-        self.set.iter()
-    }
-
     pub fn contains(&self, key: &LogKey) -> bool {
         self.set.contains(key)
     }
@@ -783,14 +767,4 @@ pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> Result<()
     lock_request_file.unlock()?;
 
     Ok(())
-}
-
-macro_rules! dbg_trace {
-    ($($args: expr),*) => {
-        print!("TRACE: file: {}, line: {}", file!(), line!());
-        $(
-            print!(", {}: {:?}", stringify!($args), $args);
-        )*
-        println!(""); // to get a new line at the end
-    }
 }

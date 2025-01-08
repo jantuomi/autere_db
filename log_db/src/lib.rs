@@ -383,6 +383,8 @@ impl<R: Recordable> DB<R> {
         let serialized = &record.serialize();
         let record_offset = self.active_data_file.seek(SeekFrom::End(0))?;
         let record_length = serialized.len() as u64;
+        assert!(record_length > 0);
+
         self.active_data_file.write_all(serialized)?;
 
         // Flush and sync data to disk
@@ -400,8 +402,8 @@ impl<R: Recordable> DB<R> {
 
         // Write the record metadata to the metadata file
         let mut metadata_buf = vec![];
-        metadata_buf.extend(&record_offset.to_be_bytes());
-        metadata_buf.extend(&record_length.to_be_bytes());
+        metadata_buf.extend(record_offset.to_be_bytes().into_iter());
+        metadata_buf.extend(record_length.to_be_bytes().into_iter());
 
         assert_eq!(metadata_buf.len(), 16);
         self.active_metadata_file.write_all(&metadata_buf)?;
@@ -429,11 +431,11 @@ impl<R: Recordable> DB<R> {
         // These post-condition asserts are commented out since they seemed
         // to sometimes report false positives.
         //
-        // let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
-        // assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
-        // assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
-        // let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
-        // assert_eq!(data_file_len, record_offset + record_length);
+        let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
+        assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
+        assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
+        let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
+        assert_eq!(data_file_len, record_offset + record_length);
 
         Ok(())
     }
@@ -497,6 +499,7 @@ impl<R: Recordable> DB<R> {
 
         let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
         let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
+        assert!(data_length > 0);
 
         let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
         let mut data_file = READ_MODE.open(&data_path)?;
@@ -585,7 +588,7 @@ impl<R: Recordable> DB<R> {
         debug!("Found log keys in secondary memtable: {:?}", log_keys);
 
         let mut records = vec![];
-        for log_key in log_keys.iter() {
+        for log_key in log_keys.into_iter() {
             // TODO optimize this so that a given segment is only opened once per find_by, and not for every log key
             let segment_num = log_key.segment_num();
             let segment_index = log_key.index();
@@ -606,6 +609,7 @@ impl<R: Recordable> DB<R> {
 
             let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
             let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
+            assert!(data_length > 0);
 
             let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
             let mut data_file = READ_MODE.open(&data_path)?;
@@ -699,8 +703,8 @@ impl<R: Recordable> DB<R> {
             }
 
             let mut metadata_entry = vec![];
-            metadata_entry.extend(offset.to_be_bytes().iter());
-            metadata_entry.extend(length.to_be_bytes().iter());
+            metadata_entry.extend(offset.to_be_bytes().into_iter());
+            metadata_entry.extend(length.to_be_bytes().into_iter());
 
             self.active_metadata_file.write_all(&metadata_entry)?;
 
@@ -755,8 +759,8 @@ impl<R: Recordable> DB<R> {
         }
 
         let mut metadata_entry = vec![];
-        metadata_entry.extend(offset.to_be_bytes().iter());
-        metadata_entry.extend(length.to_be_bytes().iter());
+        metadata_entry.extend(offset.to_be_bytes().into_iter());
+        metadata_entry.extend(length.to_be_bytes().into_iter());
 
         self.active_metadata_file.write_all(&metadata_entry)?;
 
@@ -867,11 +871,11 @@ impl<R: Recordable> DB<R> {
 
             let metadata_offset = original_index * 16;
 
-            for (i, byte) in offset.to_be_bytes().iter().enumerate() {
-                metadata_rows_buf[metadata_offset + i] = *byte;
+            for (i, byte) in offset.to_be_bytes().into_iter().enumerate() {
+                metadata_rows_buf[metadata_offset + i] = byte;
             }
-            for (i, byte) in len.to_be_bytes().iter().enumerate() {
-                metadata_rows_buf[metadata_offset + 8 + i] = *byte;
+            for (i, byte) in len.to_be_bytes().into_iter().enumerate() {
+                metadata_rows_buf[metadata_offset + 8 + i] = byte;
             }
 
             offset += len;
