@@ -120,3 +120,27 @@ pub trait Recordable {
     /// Convert a vector of database values into the data structure implementing the `Recordable` trait.
     fn from_record(record: Vec<Value>) -> Self;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_record_serialize_deserialize() {
+        let record = Record {
+            values: vec![
+                Value::Int(1),
+                Value::String("hello".to_string()),
+                Value::Bytes(vec![0, 1, 2, 3]),
+            ],
+            tombstone: true,
+        };
+
+        let serialized = record.serialize();
+        let deserialized = Record::deserialize(&serialized);
+        let reserialized = deserialized.serialize();
+
+        assert_eq!(serialized.len(), reserialized.len());
+        assert_eq!(record.values, deserialized.values);
+    }
+}

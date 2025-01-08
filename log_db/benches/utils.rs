@@ -12,9 +12,9 @@ pub enum Field {
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Inst {
-    id: i64,
-    name: String,
-    data: Vec<u8>,
+    pub id: i64,
+    pub name: String,
+    pub data: Vec<u8>,
 }
 impl Recordable for Inst {
     type Field = Field;
@@ -28,6 +28,10 @@ impl Recordable for Inst {
     fn primary_key() -> Self::Field {
         Field::Id
     }
+    fn secondary_keys() -> Vec<Self::Field> {
+        vec![Field::Name]
+    }
+
     fn into_record(self) -> Vec<Value> {
         vec![
             Value::Int(self.id),
@@ -81,11 +85,17 @@ pub fn random_inst(from_id: i64, to_id: i64) -> Inst {
     }
 }
 
-pub fn prefill_db(db: &mut DB<Inst>, n_records: usize, compact: bool) -> Result<(), DBError> {
-    for _ in 0..n_records {
+pub fn prefill_db(
+    db: &mut DB<Inst>,
+    insts: &mut Vec<Inst>,
+    n_records: usize,
+    compact: bool,
+) -> Result<(), DBError> {
+    for i in 0..(n_records - insts.len()) {
         let inst = random_inst(0, n_records as i64);
+        insts.push(inst.clone());
         db.upsert(inst)?;
-        if compact {
+        if i % 1000 == 0 && compact {
             db.do_maintenance_tasks()?;
         }
     }

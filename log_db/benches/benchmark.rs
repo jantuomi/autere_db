@@ -5,67 +5,57 @@ use log_db::*;
 use tempfile;
 use utils::*;
 
-pub fn upsert_various_initial_sizes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("upsert_various_initial_sizes");
+pub fn upsert_compacted(c: &mut Criterion) {
+    let mut group = c.benchmark_group("upsert_compacted");
+    let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
+    let data_dir = &data_dir_obj
+        .path()
+        .to_str()
+        .expect("Failed to convert tmpdir path to str");
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB");
 
-    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
-        let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-        let data_dir = &data_dir_obj
-            .path()
-            .to_str()
-            .expect("Failed to convert tmpdir path to str");
-        let mut db = DB::<Inst>::configure()
-            .data_dir(&data_dir)
-            .initialize()
-            .expect("Failed to initialize DB");
-
-        prefill_db(&mut db, size, false).expect("Failed to prefill DB");
+    let mut insts = Vec::new();
+    for size in [100_000, 1_000_000, 10_000_000] {
+        println!("Prefilling DB to {} entries", size);
+        prefill_db(&mut db, &mut insts, size, true).expect("Failed to prefill DB");
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
                 let inst = random_inst(0, size as i64 + 1);
-                let _ = db.upsert(black_box(inst));
+                let result = db.upsert(black_box(inst)).unwrap();
+                assert!(result == ());
             });
         });
     }
 }
 
-pub fn upsert_various_initial_sizes_compacted(c: &mut Criterion) {
-    let mut group = c.benchmark_group("upsert_various_initial_sizes_compacted");
+pub fn delete_existing_compacted(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delete_existing_compacted");
+    let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
+    let data_dir = &data_dir_obj
+        .path()
+        .to_str()
+        .expect("Failed to convert tmpdir path to str");
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB");
 
-    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
-        let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-        let data_dir = &data_dir_obj
-            .path()
-            .to_str()
-            .expect("Failed to convert tmpdir path to str");
-
-        let record_length = 1 + // tombstone tag
-            1 + 8 +     // int tag + int value
-            1 + 8 + 5 + // string tag + string length + string value
-            1 + 8 + 10; // bytes tag + bytes length + bytes value
-
-        let mut db = DB::<Inst>::configure()
-            .data_dir(&data_dir)
-            .segment_size(1000 * record_length)
-            .initialize()
-            .expect("Failed to initialize DB");
-
-        prefill_db(&mut db, size, true).expect("Failed to prefill DB");
-        db.do_maintenance_tasks()
-            .expect("Failed to do maintenance tasks");
+    let mut insts = Vec::new();
+    for size in [100_000, 1_000_000, 10_000_000] {
+        println!("Prefilling DB to {} entries", size);
+        prefill_db(&mut db, &mut insts, size, true).expect("Failed to prefill DB");
+        let mut inst_it = insts.iter();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
-            let mut i = 0;
             b.iter(|| {
-                let inst = random_inst(0, size as i64 + 1);
-                let _ = db.upsert(black_box(inst));
-
-                if i % 100 == 0 {
-                    db.do_maintenance_tasks()
-                        .expect("Failed to do maintenance tasks");
-                }
-                i += 1;
+                let result = db
+                    .delete(black_box(&Value::Int(inst_it.next().unwrap().id)))
+                    .unwrap();
+                assert!(result.is_some())
             });
         });
     }
@@ -89,56 +79,72 @@ pub fn upsert_write_durability(c: &mut Criterion) {
 
             b.iter(|| {
                 let inst = random_inst(0, 1000);
-                let _ = db.upsert(black_box(inst));
+                let result = db.upsert(black_box(inst)).unwrap();
+                assert!(result == ());
             });
         });
     }
 }
 
-pub fn get_from_disk_various_initial_sizes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("get_from_disk_various_initial_sizes");
+pub fn get_existing_compacted(c: &mut Criterion) {
+    let mut group = c.benchmark_group("get_existing_compacted");
 
-    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
-        let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-        let data_dir = &data_dir_obj
-            .path()
-            .to_str()
-            .expect("Failed to convert tmpdir path to str");
-        let mut db = DB::<Inst>::configure()
-            .data_dir(&data_dir)
-            .initialize()
-            .expect("Failed to initialize DB");
-        prefill_db(&mut db, size, false).expect("Failed to prefill DB");
+    let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
+    let data_dir = &data_dir_obj
+        .path()
+        .to_str()
+        .expect("Failed to convert tmpdir path to str");
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB");
+
+    let mut insts = Vec::new();
+    for size in [100_000, 1_000_000, 10_000_000] {
+        println!("Prefilling DB to {} entries", size);
+        prefill_db(&mut db, &mut insts, size, true).expect("Failed to prefill DB");
+        let mut inst_it = insts.iter();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
-                let id = random_int(0, size as i64 + 1);
-                let _ = db.get(black_box(&Value::Int(id)));
+                let result = db
+                    .get(black_box(&Value::Int(inst_it.next().unwrap().id)))
+                    .unwrap();
+                assert!(result.is_some())
             });
         });
     }
 }
 
-pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
-    let mut group = c.benchmark_group("get_from_disk_various_initial_sizes_compacted");
+pub fn find_by_existing_compacted(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_by_existing_compacted");
 
-    for size in [0, 1000, 10_000, 100_000, 1_000_000, 10_000_000] {
-        let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-        let data_dir = &data_dir_obj
-            .path()
-            .to_str()
-            .expect("Failed to convert tmpdir path to str");
-        let mut db = DB::<Inst>::configure()
-            .data_dir(&data_dir)
-            .initialize()
-            .expect("Failed to initialize DB");
+    let data_dir_path = tempfile::tempdir()
+        .expect("Failed to get tmpdir")
+        .into_path();
+    let data_dir = data_dir_path
+        .to_str()
+        .expect("Failed to convert tmpdir path to str");
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB");
 
-        prefill_db(&mut db, size, true).expect("Failed to prefill DB");
+    let mut insts = Vec::new();
+    let mut inst_index = 0;
+    for size in [100_000, 1_000_000, 10_000_000] {
+        println!("Prefilling DB to {} entries", size);
+        prefill_db(&mut db, &mut insts, size, true).expect("Failed to prefill DB");
+        println!("DB prefilling done, insts.len = {}", insts.len());
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
-                let id = random_int(0, size as i64 + 1);
-                let _ = db.get(black_box(&Value::Int(id)));
+                let name = insts[inst_index].name.clone();
+                let result = db
+                    .find_by(black_box(&Field::Name), black_box(&Value::String(name)))
+                    .unwrap();
+                assert!(result.len() > 0);
+                inst_index = (inst_index + 1) % insts.len();
             });
         });
     }
@@ -147,10 +153,10 @@ pub fn get_from_disk_various_initial_sizes_compacted(c: &mut Criterion) {
 // Register the benchmark group
 criterion_group!(
     benches,
-    upsert_various_initial_sizes,
-    upsert_various_initial_sizes_compacted,
+    upsert_compacted,
+    delete_existing_compacted,
     upsert_write_durability,
-    get_from_disk_various_initial_sizes,
-    get_from_disk_various_initial_sizes_compacted,
+    get_existing_compacted,
+    find_by_existing_compacted,
 );
 criterion_main!(benches);

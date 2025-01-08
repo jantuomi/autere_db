@@ -428,9 +428,7 @@ impl<R: Recordable> DB<R> {
 
         self.insert_record_to_memtables(&log_key, &record);
 
-        // These post-condition asserts are commented out since they seemed
-        // to sometimes report false positives.
-        //
+        // These post-condition asserts feel like they sometimes report false positives.
         let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
         assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
         assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
@@ -810,50 +808,78 @@ impl<R: Recordable> DB<R> {
 
         self.active_data_file.lock_shared()?;
         let original_data_len = self.active_data_file.seek(SeekFrom::End(0))?;
-        let metadata_size = self.active_metadata_file.seek(SeekFrom::End(0))?;
+
+        let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
+        let active_num = parse_segment_number(&active_target)?;
 
         debug!("Reading segment data into a BTreeMap");
-        let mut map = BTreeMap::new();
-        let forward_log_reader = ForwardLogReader::new(
+        let mut pk_to_item_map = BTreeMap::new();
+        let forward_read_items: Vec<(IndexableValue, Record)> = ForwardLogReader::new(
             self.active_metadata_file.try_clone()?,
             self.active_data_file.try_clone()?,
-        );
+        )
+        .map(|item| {
+            (
+                item.record
+                    .at(self.primary_key_index)
+                    .as_indexable()
+                    .expect("Primary key was not indexable"),
+                item.record,
+            )
+        })
+        .collect();
 
         self.active_data_file.unlock()?;
 
-        let mut read_n = 0;
-        for (original_index, item) in forward_log_reader.enumerate() {
-            let pk = item
-                .record
-                .at(self.primary_key_index)
-                .as_indexable()
-                .expect("Primary key was not indexable");
-
+        for (pk, record) in forward_read_items.iter() {
             // If the record is a tombstone, remove the PK from the map
-            if item.record.tombstone {
-                map.remove(&pk);
+            if record.tombstone {
+                pk_to_item_map.remove(pk);
             } else {
-                map.insert(pk, (original_index, item.record));
+                pk_to_item_map.insert(pk, record);
             }
-
-            read_n += 1;
         }
 
         debug!(
             "Read {} records, out of which {} were unique",
-            read_n,
-            map.len()
+            forward_read_items.len(),
+            pk_to_item_map.len()
         );
-        debug!("Opening temporary files for writing compacted data");
-        // Create a new log data file
+
+        // Create a new log data file and write it
+        debug!("Opening new data file and writing compacted data");
         let (new_data_uuid, new_data_path) = create_segment_data_file(&self.data_dir)?;
         let mut new_data_file = APPEND_MODE.open(&new_data_path)?;
 
+        let mut pk_to_data_map = BTreeMap::new();
+        let mut offset = 0u64;
+        for (pk, record) in pk_to_item_map.into_iter() {
+            let serialized = record.serialize();
+            let len = serialized.len() as u64;
+            new_data_file.write_all(&serialized)?;
+
+            pk_to_data_map.insert(pk, (offset, len));
+            offset += len;
+        }
+
+        // Sync the data file to disk.
+        // This is fine to do without consulting WriteDurability because this is a one-off
+        // operation that is not part of the normal write path.
+        new_data_file.flush()?;
+        new_data_file.sync_all()?;
+
+        let final_data_len = new_data_file.seek(io::SeekFrom::End(0))?;
+        debug!(
+            "Wrote compacted data, reduced data size: {} -> {}",
+            original_data_len, final_data_len
+        );
+
+        // Create a new log metadata file and write it
+        debug!("Opening temp metadata file and writing pointers to compacted data file");
         let temp_metadata_file = tempfile::NamedTempFile::new()?;
         let temp_metadata_path = temp_metadata_file.as_ref();
         let mut temp_metadata_file = WRITE_MODE.open(temp_metadata_path)?;
 
-        debug!("Writing compacted data to temporary files");
         let metadata_header = MetadataHeader {
             version: 1,
             uuid: new_data_uuid,
@@ -861,37 +887,19 @@ impl<R: Recordable> DB<R> {
 
         temp_metadata_file.write_all(&metadata_header.serialize())?;
 
-        let mut metadata_rows_buf = vec![0; metadata_size as usize - METADATA_FILE_HEADER_SIZE];
+        for (pk, _) in forward_read_items.iter() {
+            let (offset, len) = pk_to_data_map.get(&pk).unwrap();
 
-        let mut offset = 0u64;
-        for (original_index, record) in map.values() {
-            let serialized = record.serialize();
-            let len = serialized.len() as u64;
-            new_data_file.write_all(&serialized)?;
+            let mut metadata_buf = vec![];
+            metadata_buf.extend(offset.to_be_bytes().into_iter());
+            metadata_buf.extend(len.to_be_bytes().into_iter());
 
-            let metadata_offset = original_index * 16;
-
-            for (i, byte) in offset.to_be_bytes().into_iter().enumerate() {
-                metadata_rows_buf[metadata_offset + i] = byte;
-            }
-            for (i, byte) in len.to_be_bytes().into_iter().enumerate() {
-                metadata_rows_buf[metadata_offset + 8 + i] = byte;
-            }
-
-            offset += len;
+            temp_metadata_file.write_all(&metadata_buf)?;
         }
 
-        temp_metadata_file.write_all(&metadata_rows_buf)?;
-
-        // Sync the temporary files to disk
-        // This is fine to do without consulting WriteDurability because this is a one-off
-        // operation that is not part of the normal write path.
+        // Sync the metadata file to disk, see comment above about sync.
         temp_metadata_file.flush()?;
-        new_data_file.flush()?;
-
-        let final_len = new_data_file.seek(io::SeekFrom::End(0))?;
-
-        let active_num = greatest_segment_number(&self.data_dir)?;
+        temp_metadata_file.sync_all()?;
 
         debug!("Moving temporary files to their final locations");
         let new_data_path = &self.data_dir.join(new_data_uuid.to_string());
@@ -899,10 +907,7 @@ impl<R: Recordable> DB<R> {
 
         fs::rename(&temp_metadata_path, &active_metadata_path)?;
 
-        debug!(
-            "Compaction complete, reduced data size: {} -> {}",
-            original_data_len, final_len
-        );
+        debug!("Compaction complete, creating new segment");
 
         let new_segment_num = active_num + 1;
         let new_metadata_path = self.data_dir.join(metadata_filename(new_segment_num));
@@ -925,8 +930,8 @@ impl<R: Recordable> DB<R> {
 
         // The new active log file is not locked by this client so it cannot be touched.
         debug!(
-            "Active log file rotated and compacted, new segment: {}",
-            new_segment_num
+            "Active log file {} rotated and compacted, new segment: {}",
+            active_num, new_segment_num
         );
 
         Ok(())
