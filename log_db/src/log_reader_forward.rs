@@ -87,11 +87,9 @@ impl Iterator for ForwardLogReader {
     type Item = ForwardLogReaderItem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.read_record() {
-            Ok(Some(record)) => Some(record),
-            Ok(None) => None,
-            Err(err) => panic!("Error reading record: {:?}", err),
-        }
+        self.read_record().unwrap_or_else(|err| {
+            panic!("Error reading record: {:?}", err);
+        })
     }
 }
 
