@@ -1,5 +1,7 @@
 mod utils;
 
+use std::collections::HashSet;
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use log_db::*;
 use tempfile;
@@ -48,14 +50,16 @@ pub fn delete_existing_compacted(c: &mut Criterion) {
     for size in [100_000, 1_000_000, 10_000_000] {
         println!("Prefilling DB to {} entries", size);
         prefill_db(&mut db, &mut insts, size, true).expect("Failed to prefill DB");
-        let mut inst_it = insts.iter();
+
+        let pk_set: HashSet<i64> = insts.iter().map(|inst| inst.id).collect();
+        let mut pk_set_it = pk_set.into_iter();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
                 let result = db
-                    .delete(black_box(&Value::Int(inst_it.next().unwrap().id)))
+                    .delete(black_box(&Value::Int(pk_set_it.next().unwrap())))
                     .unwrap();
-                assert!(result.is_some())
+                assert!(result.is_some());
             });
         });
     }

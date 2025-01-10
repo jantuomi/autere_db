@@ -813,7 +813,7 @@ impl<R: Recordable> DB<R> {
         let active_num = parse_segment_number(&active_target)?;
 
         debug!("Reading segment data into a BTreeMap");
-        let mut pk_to_item_map = BTreeMap::new();
+        let mut pk_to_item_map: BTreeMap<&IndexableValue, &Record> = BTreeMap::new();
         let forward_read_items: Vec<(IndexableValue, Record)> = ForwardLogReader::new(
             self.active_metadata_file.try_clone()?,
             self.active_data_file.try_clone()?,
@@ -832,12 +832,7 @@ impl<R: Recordable> DB<R> {
         self.active_data_file.unlock()?;
 
         for (pk, record) in forward_read_items.iter() {
-            // If the record is a tombstone, remove the PK from the map
-            if record.tombstone {
-                pk_to_item_map.remove(pk);
-            } else {
-                pk_to_item_map.insert(pk, record);
-            }
+            pk_to_item_map.insert(pk, record);
         }
 
         debug!(
