@@ -744,14 +744,26 @@ impl<R: Recordable> DB<R> {
     /// Deletion is done by marking the record as a tombstone. The record will still be present in the log file,
     /// but will be ignored by reads. Upon compaction, tombstoned records will be removed.
     pub fn delete_by(&mut self, field: &R::Field, value: &Value) -> Result<Vec<R>, DBError> {
-        if field == &self.config.primary_key {
-            let rec = self.delete(value)?;
-            return match rec {
-                Some(rec) => Ok(vec![rec]),
-                None => Ok(vec![]),
-            };
-        }
+        let recs = self.delete_by_field(field, value)?;
 
+        Ok(recs
+            .into_iter()
+            .map(|rec| R::from_record(rec.values))
+            .collect())
+    }
+
+    /// Delete record by primary key.
+    pub fn delete(&mut self, pk: &Value) -> Result<Option<R>, DBError> {
+        let recs = self.delete_by_field(&self.config.primary_key.clone(), pk)?;
+        assert!(recs.len() <= 1);
+
+        Ok(recs
+            .into_iter()
+            .next()
+            .map(|rec| R::from_record(rec.values)))
+    }
+
+    fn delete_by_field(&mut self, field: &R::Field, value: &Value) -> Result<Vec<Record>, DBError> {
         let mut recs = self.find_by_records(field, value)?;
         for rec in &mut recs {
             rec.tombstone = true;
@@ -798,64 +810,9 @@ impl<R: Recordable> DB<R> {
         self.active_metadata_file.unlock()?;
         self.active_data_file.unlock()?;
 
-        debug!("Records deleted, returning from delete_by");
+        debug!("Records deleted");
 
-        Ok(recs
-            .into_iter()
-            .map(|rec| R::from_record(rec.values))
-            .collect())
-    }
-
-    /// Delete record by primary key.
-    pub fn delete(&mut self, pk: &Value) -> Result<Option<R>, DBError> {
-        let mut record = match self.get_record(pk)? {
-            Some(record) => record,
-            None => return Ok(None),
-        };
-
-        record.tombstone = true;
-        let record_serialized = record.serialize();
-
-        request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
-        self.active_data_file.lock_exclusive()?;
-
-        let offset = self.active_data_file.seek(SeekFrom::End(0))?;
-        let length = record_serialized.len() as u64;
-
-        self.active_data_file.write_all(&record_serialized)?;
-
-        // Flush and sync data to disk
-        if self.config.write_durability == WriteDurability::Flush {
-            self.active_data_file.flush()?;
-        }
-        if self.config.write_durability == WriteDurability::FlushSync {
-            self.active_data_file.flush()?;
-            self.active_data_file.sync_all()?;
-        }
-
-        let mut metadata_entry = vec![];
-        metadata_entry.extend(offset.to_be_bytes().into_iter());
-        metadata_entry.extend(length.to_be_bytes().into_iter());
-
-        self.active_metadata_file.write_all(&metadata_entry)?;
-
-        // Flush and sync metadata to disk
-        if self.config.write_durability == WriteDurability::Flush {
-            self.active_metadata_file.flush()?;
-        }
-        if self.config.write_durability == WriteDurability::FlushSync {
-            self.active_metadata_file.flush()?;
-            self.active_metadata_file.sync_all()?;
-        }
-
-        self.remove_record_from_memtables(&record);
-
-        self.active_metadata_file.unlock()?;
-        self.active_data_file.unlock()?;
-
-        debug!("Record deleted, returning from delete");
-
-        Ok(Some(R::from_record(record.values)))
+        Ok(recs)
     }
 
     /// Check if there are any pending tasks and do them. Tasks include:
