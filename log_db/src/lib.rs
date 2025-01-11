@@ -23,6 +23,7 @@ use std::fmt::Debug;
 use std::fs::{self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
+use std::ops::*;
 use std::path::{Path, PathBuf};
 
 pub struct ConfigBuilder<R: Recordable> {
@@ -459,9 +460,8 @@ impl<R: Recordable> DB<R> {
             "Getting record with field {:?} = {:?}",
             &self.config.primary_key, query_key
         );
-        let query_key = query_key.as_indexable().ok_or(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Queried value must be indexable",
+        let query_key = query_key.as_indexable().ok_or(DBError::ValidationError(
+            "Queried value must be indexable".to_owned(),
         ))?;
 
         if self.config.read_consistency == ReadConsistency::Strong {
@@ -478,43 +478,15 @@ impl<R: Recordable> DB<R> {
         };
 
         debug!("Found log_key in primary memtable: {:?}", log_key);
-        let segment_num = log_key.segment_num();
-        let segment_index = log_key.index();
 
-        let metadata_path = &self.data_dir.join(metadata_filename(segment_num));
-        let mut metadata_file = READ_MODE.open(&metadata_path)?;
+        let record = self
+            .read_log_keys(std::iter::once(log_key.clone()))?
+            .into_iter()
+            .next()
+            .unwrap();
 
-        request_shared_lock(&self.data_dir, &mut metadata_file)?;
+        debug!("Read record");
 
-        let metadata_header = read_metadata_header(&mut metadata_file)?;
-
-        metadata_file.seek_relative(segment_index as i64 * 16)?;
-
-        let mut metadata_buf = [0; 2 * 8];
-        metadata_file.read_exact(&mut metadata_buf)?;
-
-        metadata_file.unlock()?;
-
-        let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
-        let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
-        assert!(data_length > 0);
-
-        let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
-        let mut data_file = READ_MODE.open(&data_path)?;
-
-        request_shared_lock(&self.data_dir, &mut data_file)?;
-
-        data_file.seek(SeekFrom::Start(data_offset))?;
-
-        let mut data_buf = vec![0; data_length as usize];
-        data_file.read_exact(&mut data_buf)?;
-
-        debug!(
-            "Read matching record with size {} from log file, deserializing and returning.",
-            data_buf.len()
-        );
-
-        let record = Record::deserialize(&data_buf);
         Ok(Some(record))
     }
 
@@ -556,9 +528,8 @@ impl<R: Recordable> DB<R> {
 
         // Otherwise, continue with querying secondary indexes.
         debug!("Finding all records with field {:?} = {:?}", field, value);
-        let query_key = value.as_indexable().ok_or(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Queried value must be indexable",
+        let query_key = value.as_indexable().ok_or(DBError::ValidationError(
+            "Queried value must be indexable".to_owned(),
         ))?;
 
         // Try to find a memtable with the queried key
@@ -567,7 +538,7 @@ impl<R: Recordable> DB<R> {
                 Some(index) => index,
                 None => {
                     return Err(DBError::ValidationError(
-                        "Cannot find_by by non-secondary key".to_owned(),
+                        "Cannot find_by by non-indexed key".to_owned(),
                     ))
                 }
             };
@@ -581,13 +552,25 @@ impl<R: Recordable> DB<R> {
             query_key
         );
         let memtable = &self.secondary_memtables[memtable_index];
-        let log_keys = memtable.find_by(&query_key);
+        let log_keys = memtable.find_by(&query_key).clone();
 
         debug!("Found log keys in secondary memtable: {:?}", log_keys);
 
+        let ret = self.read_log_keys(log_keys.into_iter())?;
+
+        debug!("Read {} records", ret.len());
+
+        Ok(ret)
+    }
+
+    // log_keys is an iterator of LogKeys
+    fn read_log_keys(
+        &mut self,
+        log_keys: impl Iterator<Item = LogKey>,
+    ) -> Result<Vec<Record>, DBError> {
         let mut records = vec![];
-        for log_key in log_keys.into_iter() {
-            // TODO optimize this so that a given segment is only opened once per find_by, and not for every log key
+        for log_key in log_keys {
+            // TODO optimize this so that a given segment is only opened once, and not for every log key
             let segment_num = log_key.segment_num();
             let segment_index = log_key.index();
 
@@ -619,16 +602,90 @@ impl<R: Recordable> DB<R> {
             let mut data_buf = vec![0; data_length as usize];
             data_file.read_exact(&mut data_buf)?;
 
-            debug!(
-                "Read matching record with size {} from log file, deserializing and adding to result set.",
-                data_buf.len()
-            );
-
             let record = Record::deserialize(&data_buf);
             records.push(record);
         }
 
         Ok(records)
+    }
+
+    pub fn range_by<B: RangeBounds<Value>>(
+        &mut self,
+        field: &R::Field,
+        range: B,
+    ) -> Result<Vec<R>, DBError> {
+        Ok(self
+            .range_by_records(field, range)?
+            .into_iter()
+            .map(|rec| R::from_record(rec.values))
+            .collect())
+    }
+
+    fn range_by_records<B: RangeBounds<Value>>(
+        &mut self,
+        field: &R::Field,
+        range: B,
+    ) -> Result<Vec<Record>, DBError> {
+        fn range_bound_to_indexable(
+            bound: Bound<&Value>,
+            field_type: &ValueType,
+        ) -> Result<Bound<IndexableValue>, DBError> {
+            fn convert(value: &Value, field_type: &ValueType) -> Result<IndexableValue, DBError> {
+                if !type_check(&value, field_type) {
+                    return Err(DBError::ValidationError(format!(
+                        "Queried value does not match type: {:?}",
+                        field_type
+                    )));
+                }
+                value.as_indexable().ok_or(DBError::ValidationError(
+                    "Queried value must be indexable".to_owned(),
+                ))
+            }
+
+            match bound {
+                Bound::Included(value) => convert(value, field_type).map(Bound::Included),
+                Bound::Excluded(value) => convert(value, field_type).map(Bound::Excluded),
+                Bound::Unbounded => Ok(Bound::Unbounded),
+            }
+        }
+
+        let field_type = self
+            .config
+            .fields
+            .iter()
+            .find(|(f, _)| f == field)
+            .map(|(_, t)| t)
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Field not found in schema",
+            ))?;
+
+        let start_indexable = range_bound_to_indexable(range.start_bound(), field_type)?;
+        let end_indexable = range_bound_to_indexable(range.end_bound(), field_type)?;
+
+        let indexable_bounds = OwnedBounds::new(start_indexable, end_indexable);
+
+        if self.config.read_consistency == ReadConsistency::Strong {
+            self.refresh_indexes()?;
+        }
+
+        let log_keys = if field == &self.config.primary_key {
+            self.primary_memtable.range(indexable_bounds)
+        } else {
+            let smemtable_index =
+                match get_secondary_memtable_index_by_field(&self.config.secondary_keys, field) {
+                    Some(index) => index,
+                    None => {
+                        return Err(DBError::ValidationError(
+                            "Cannot range_by by non-indexed key".to_owned(),
+                        ))
+                    }
+                };
+
+            self.secondary_memtables[smemtable_index].range(indexable_bounds)
+        };
+
+        self.read_log_keys(log_keys.into_iter())
     }
 
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.

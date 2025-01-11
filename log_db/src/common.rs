@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::{self, metadata, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
 use std::thread;
 use thiserror::Error;
@@ -767,4 +768,25 @@ pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> Result<()
     lock_request_file.unlock()?;
 
     Ok(())
+}
+
+pub struct OwnedBounds<T> {
+    start: Bound<T>,
+    end: Bound<T>,
+}
+
+impl<T> OwnedBounds<T> {
+    pub fn new(start: Bound<T>, end: Bound<T>) -> Self {
+        OwnedBounds { start, end }
+    }
+}
+
+impl<T> RangeBounds<T> for OwnedBounds<T> {
+    fn start_bound(&self) -> Bound<&T> {
+        self.start.as_ref()
+    }
+
+    fn end_bound(&self) -> Bound<&T> {
+        self.end.as_ref()
+    }
 }

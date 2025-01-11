@@ -1,4 +1,4 @@
-use super::common::*;
+use super::*;
 use std::collections::BTreeMap;
 
 pub struct PrimaryMemtable {
@@ -29,5 +29,12 @@ impl PrimaryMemtable {
 
     pub fn remove(&mut self, key: &IndexableValue) -> Option<LogKey> {
         self.records.remove(key)
+    }
+
+    pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<LogKey> {
+        self.records
+            .range(range)
+            .map(|(_, log_key)| log_key.clone())
+            .collect()
     }
 }

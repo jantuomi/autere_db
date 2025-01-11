@@ -75,4 +75,12 @@ impl SecondaryMemtable {
 
         removed
     }
+
+    pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<LogKey> {
+        let mut keys = Vec::new();
+        for (_, set) in self.records.range(range) {
+            keys.extend(set.log_keys().iter().cloned());
+        }
+        keys
+    }
 }
