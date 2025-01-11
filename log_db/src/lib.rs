@@ -569,10 +569,21 @@ impl<R: Recordable> DB<R> {
         log_keys: impl Iterator<Item = LogKey>,
     ) -> Result<Vec<Record>, DBError> {
         let mut records = vec![];
+        let mut log_keys_map = BTreeMap::new();
+
         for log_key in log_keys {
-            // TODO optimize this so that a given segment is only opened once, and not for every log key
-            let segment_num = log_key.segment_num();
-            let segment_index = log_key.index();
+            if !log_keys_map.contains_key(&log_key.segment_num()) {
+                log_keys_map.insert(log_key.segment_num(), vec![log_key.index()]);
+            } else {
+                log_keys_map
+                    .get_mut(&log_key.segment_num())
+                    .unwrap()
+                    .push(log_key.index());
+            }
+        }
+
+        for (segment_num, mut segment_indexes) in log_keys_map {
+            segment_indexes.sort_unstable();
 
             let metadata_path = &self.data_dir.join(metadata_filename(segment_num));
             let mut metadata_file = READ_MODE.open(&metadata_path)?;
@@ -581,29 +592,38 @@ impl<R: Recordable> DB<R> {
 
             let metadata_header = read_metadata_header(&mut metadata_file)?;
 
-            metadata_file.seek_relative(segment_index as i64 * 16)?;
-
-            let mut metadata_buf = [0; 2 * 8];
-            metadata_file.read_exact(&mut metadata_buf)?;
-
-            metadata_file.unlock()?;
-
-            let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
-            let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
-            assert!(data_length > 0);
-
             let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
             let mut data_file = READ_MODE.open(&data_path)?;
 
-            request_shared_lock(&self.data_dir, &mut data_file)?;
+            data_file.lock_shared()?;
 
-            data_file.seek(SeekFrom::Start(data_offset))?;
+            let header_size = METADATA_FILE_HEADER_SIZE as i64;
+            let row_length = METADATA_ROW_LENGTH as i64;
+            let mut current_metadata_offset = header_size;
+            for segment_index in segment_indexes {
+                let new_metadata_offset = header_size + segment_index as i64 * row_length;
+                metadata_file.seek_relative(new_metadata_offset - current_metadata_offset)?;
 
-            let mut data_buf = vec![0; data_length as usize];
-            data_file.read_exact(&mut data_buf)?;
+                let mut metadata_buf = [0; METADATA_ROW_LENGTH];
+                metadata_file.read_exact(&mut metadata_buf)?;
 
-            let record = Record::deserialize(&data_buf);
-            records.push(record);
+                let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
+                let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
+                assert!(data_length > 0);
+
+                data_file.seek(SeekFrom::Start(data_offset))?;
+
+                let mut data_buf = vec![0; data_length as usize];
+                data_file.read_exact(&mut data_buf)?;
+
+                let record = Record::deserialize(&data_buf);
+                records.push(record);
+
+                current_metadata_offset = new_metadata_offset + row_length;
+            }
+
+            metadata_file.unlock()?;
+            data_file.unlock()?;
         }
 
         Ok(records)
