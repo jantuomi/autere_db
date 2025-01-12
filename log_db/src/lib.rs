@@ -441,53 +441,14 @@ impl<R: Recordable> DB<R> {
 
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
-    pub fn get(&mut self, query_key: &Value) -> Result<Option<R>, DBError> {
-        Ok(self
-            .get_record(query_key)?
-            .map(|rec| R::from_record(rec.values)))
-    }
+    pub fn get(&mut self, value: &Value) -> Result<Option<R>, DBError> {
+        let records = self.find_by_records(&self.config.primary_key.clone(), value)?;
+        assert!(records.len() <= 1);
 
-    fn get_record(&mut self, query_key: &Value) -> Result<Option<Record>, DBError> {
-        let pk_type = &self.config.fields[self.primary_key_index].1;
-        if !type_check(&query_key, &pk_type) {
-            return Err(DBError::ValidationError(format!(
-                "Queried value does not match primary key type: {:?}",
-                pk_type
-            )));
-        }
-
-        debug!(
-            "Getting record with field {:?} = {:?}",
-            &self.config.primary_key, query_key
-        );
-        let query_key = query_key.as_indexable().ok_or(DBError::ValidationError(
-            "Queried value must be indexable".to_owned(),
-        ))?;
-
-        if self.config.read_consistency == ReadConsistency::Strong {
-            self.refresh_indexes()?;
-        }
-
-        debug!("Looking up key {:?} in primary memtable", query_key);
-        let log_key = match self.primary_memtable.get(&query_key) {
-            Some(log_key) => log_key,
-            None => {
-                debug!("Not found in primary memtable, returning None");
-                return Ok(None);
-            }
-        };
-
-        debug!("Found log_key in primary memtable: {:?}", log_key);
-
-        let record = self
-            .read_log_keys(std::iter::once(log_key.clone()))?
+        Ok(records
             .into_iter()
             .next()
-            .unwrap();
-
-        debug!("Read record");
-
-        Ok(Some(record))
+            .map(|rec| R::from_record(rec.values)))
     }
 
     /// Get a collection of records based on a field value.
@@ -501,15 +462,7 @@ impl<R: Recordable> DB<R> {
     }
 
     fn find_by_records(&mut self, field: &R::Field, value: &Value) -> Result<Vec<Record>, DBError> {
-        // If querying by primary key, return the result of `get` wrapped in a vec.
-        if field == &self.config.primary_key {
-            return match self.get_record(value)? {
-                Some(record) => Ok(vec![record]),
-                None => Ok(vec![]),
-            };
-        }
-
-        let sk_type = self
+        let field_type = self
             .config
             .fields
             .iter()
@@ -519,10 +472,10 @@ impl<R: Recordable> DB<R> {
                 io::ErrorKind::InvalidInput,
                 "Field not found in schema",
             ))?;
-        if !type_check(&value, &sk_type) {
+        if !type_check(&value, &field_type) {
             return Err(DBError::ValidationError(format!(
-                "Queried value does not match secondary key type: {:?}",
-                sk_type
+                "Queried value does not match key type: {:?}",
+                field_type
             )));
         }
 
@@ -532,29 +485,35 @@ impl<R: Recordable> DB<R> {
             "Queried value must be indexable".to_owned(),
         ))?;
 
-        // Try to find a memtable with the queried key
-        let memtable_index =
-            match get_secondary_memtable_index_by_field(&self.config.secondary_keys, field) {
-                Some(index) => index,
-                None => {
-                    return Err(DBError::ValidationError(
-                        "Cannot find_by by non-indexed key".to_owned(),
-                    ))
-                }
-            };
-
         if self.config.read_consistency == ReadConsistency::Strong {
             self.refresh_indexes()?;
         }
 
-        debug!(
-            "Found suitable secondary index. Looking up key {:?} in the memtable",
-            query_key
-        );
-        let memtable = &self.secondary_memtables[memtable_index];
-        let log_keys = memtable.find_by(&query_key).clone();
+        let log_keys = if field == &self.config.primary_key {
+            let opt = self.primary_memtable.get(&query_key);
+            match opt {
+                Some(log_key) => vec![log_key.clone()],
+                None => vec![],
+            }
+        } else {
+            let smemtable_index =
+                match get_secondary_memtable_index_by_field(&self.config.secondary_keys, field) {
+                    Some(index) => index,
+                    None => {
+                        return Err(DBError::ValidationError(
+                            "Cannot find_by by non-indexed key".to_owned(),
+                        ))
+                    }
+                };
 
-        debug!("Found log keys in secondary memtable: {:?}", log_keys);
+            self.secondary_memtables[smemtable_index]
+                .find_by(&query_key)
+                .into_iter()
+                .cloned()
+                .collect()
+        };
+
+        debug!("Found log keys in memtable: {:?}", log_keys);
 
         let ret = self.read_log_keys(log_keys.into_iter())?;
 
