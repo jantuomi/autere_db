@@ -186,27 +186,13 @@ impl<R: Recordable> DB<R> {
         // If any of the keys is not in the schema or
         // is not an IndexableValue, return an error
         for &key in &all_keys {
-            let (
-                _,
-                ValueType {
-                    prim_value_type, ..
-                },
-            ) = config
-                .fields
-                .iter()
-                .find(|(field, _)| field == key)
-                .ok_or(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Secondary key must be present in the field schema",
-                ))?;
+            let (_, value_type) = config.fields.iter().find(|(field, _)| field == key).ok_or(
+                DBError::ValidationError("Key must be present in the field schema".to_owned()),
+            )?;
 
-            match prim_value_type {
+            match value_type.prim_value_type {
                 PrimValueType::Int | PrimValueType::String => {}
-                _ => {
-                    return Err(DBError::ValidationError(
-                        "Secondary key must be an IndexableValue".to_owned(),
-                    ))
-                }
+                _ => return Err(DBError::ValidationError("Key must be indexable".to_owned())),
             }
         }
         let primary_memtable = PrimaryMemtable::new();
@@ -462,16 +448,10 @@ impl<R: Recordable> DB<R> {
     }
 
     fn find_by_records(&mut self, field: &R::Field, value: &Value) -> Result<Vec<Record>, DBError> {
-        let field_type = self
-            .config
-            .fields
-            .iter()
-            .find(|(f, _)| f == field)
-            .map(|(_, t)| t)
-            .ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Field not found in schema",
-            ))?;
+        let field_type = self.get_field_type(field).ok_or(DBError::ValidationError(
+            "Field not found in schema".to_owned(),
+        ))?;
+
         if !type_check(&value, &field_type) {
             return Err(DBError::ValidationError(format!(
                 "Queried value does not match key type: {:?}",
@@ -628,16 +608,9 @@ impl<R: Recordable> DB<R> {
             }
         }
 
-        let field_type = self
-            .config
-            .fields
-            .iter()
-            .find(|(f, _)| f == field)
-            .map(|(_, t)| t)
-            .ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Field not found in schema",
-            ))?;
+        let field_type = self.get_field_type(field).ok_or(DBError::ValidationError(
+            "Field not found in schema".to_owned(),
+        ))?;
 
         let start_indexable = range_bound_to_indexable(range.start_bound(), field_type)?;
         let end_indexable = range_bound_to_indexable(range.end_bound(), field_type)?;
@@ -651,17 +624,12 @@ impl<R: Recordable> DB<R> {
         let log_keys = if field == &self.config.primary_key {
             self.primary_memtable.range(indexable_bounds)
         } else {
-            let smemtable_index =
-                match get_secondary_memtable_index_by_field(&self.config.secondary_keys, field) {
-                    Some(index) => index,
-                    None => {
-                        return Err(DBError::ValidationError(
-                            "Cannot range_by by non-indexed key".to_owned(),
-                        ))
-                    }
-                };
+            let index = get_secondary_memtable_index_by_field(&self.config.secondary_keys, field)
+                .ok_or_else(|| {
+                DBError::ValidationError("Cannot range_by by non-indexed key".to_owned())
+            })?;
 
-            self.secondary_memtables[smemtable_index].range(indexable_bounds)
+            self.secondary_memtables[index].range(indexable_bounds)
         };
 
         self.read_log_keys(log_keys.into_iter())
@@ -923,6 +891,15 @@ impl<R: Recordable> DB<R> {
         );
 
         Ok(())
+    }
+
+    #[inline]
+    fn get_field_type(&self, field: &R::Field) -> Option<&ValueType> {
+        self.config
+            .fields
+            .iter()
+            .find(|(f, _)| f == field)
+            .map(|(_, t)| t)
     }
 }
 
