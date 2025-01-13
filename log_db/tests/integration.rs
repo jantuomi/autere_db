@@ -569,3 +569,51 @@ fn test_delete_by() {
         1
     );
 }
+
+#[test]
+fn test_range_by_id() {
+    let data_dir = tmp_dir();
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    let inserted_ids = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    for id in inserted_ids.iter() {
+        db.upsert(Inst {
+            id: *id,
+            name: Some("Foobar".to_string()),
+            data: vec![],
+        })
+        .unwrap();
+    }
+
+    // Test range [3, 7)
+    let received = db
+        .range_by(&Field::Id, &Value::Int(3)..&Value::Int(7))
+        .unwrap();
+    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+
+    assert_eq!(received_ids, vec![3, 4, 5, 6]);
+
+    // Test range [3, 7]
+    let received = db
+        .range_by(&Field::Id, &Value::Int(3)..=&Value::Int(7))
+        .unwrap();
+    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+
+    assert_eq!(received_ids, vec![3, 4, 5, 6, 7]);
+
+    // Test range (-inf, 7]
+    let received = db.range_by(&Field::Id, ..=&Value::Int(7)).unwrap();
+    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+
+    assert_eq!(received_ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+    // Test range (3, inf)
+    let received = db.range_by(&Field::Id, &Value::Int(3)..).unwrap();
+    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+
+    assert_eq!(received_ids, vec![3, 4, 5, 6, 7, 8, 9]);
+}
