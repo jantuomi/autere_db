@@ -449,6 +449,22 @@ impl<R: Recordable> DB<R> {
             .collect())
     }
 
+    /// Get a collection of records based on a sequence of field values.
+    /// Indexes will be used if they are applicable.
+    /// Returns a vector of pairs where the first value is an index into the given sequence of values,
+    /// and the second value is the record.
+    pub fn batch_find_by(
+        &mut self,
+        field: &R::Field,
+        values: &[Value],
+    ) -> Result<Vec<(usize, R)>, DBError> {
+        Ok(self
+            .batch_find_by_records(field, values.iter())?
+            .into_iter()
+            .map(|(tag, rec)| (tag, R::from_record(rec.values)))
+            .collect())
+    }
+
     fn batch_find_by_records<'a>(
         &mut self,
         field: &R::Field,
@@ -597,72 +613,6 @@ impl<R: Recordable> DB<R> {
         Ok(records)
     }
 
-    // log_keys is an iterator of LogKeys
-    fn read_log_keys(
-        &mut self,
-        log_keys: impl Iterator<Item = LogKey>,
-    ) -> Result<Vec<Record>, DBError> {
-        let mut records = vec![];
-        let mut log_keys_map = BTreeMap::new();
-
-        for log_key in log_keys {
-            if !log_keys_map.contains_key(&log_key.segment_num()) {
-                log_keys_map.insert(log_key.segment_num(), vec![log_key.index()]);
-            } else {
-                log_keys_map
-                    .get_mut(&log_key.segment_num())
-                    .unwrap()
-                    .push(log_key.index());
-            }
-        }
-
-        for (segment_num, mut segment_indexes) in log_keys_map {
-            segment_indexes.sort_unstable();
-
-            let metadata_path = &self.data_dir.join(metadata_filename(segment_num));
-            let mut metadata_file = READ_MODE.open(&metadata_path)?;
-
-            request_shared_lock(&self.data_dir, &mut metadata_file)?;
-
-            let metadata_header = read_metadata_header(&mut metadata_file)?;
-
-            let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
-            let mut data_file = READ_MODE.open(&data_path)?;
-
-            data_file.lock_shared()?;
-
-            let header_size = METADATA_FILE_HEADER_SIZE as i64;
-            let row_length = METADATA_ROW_LENGTH as i64;
-            let mut current_metadata_offset = header_size;
-            for segment_index in segment_indexes {
-                let new_metadata_offset = header_size + segment_index as i64 * row_length;
-                metadata_file.seek_relative(new_metadata_offset - current_metadata_offset)?;
-
-                let mut metadata_buf = [0; METADATA_ROW_LENGTH];
-                metadata_file.read_exact(&mut metadata_buf)?;
-
-                let data_offset = u64::from_be_bytes(metadata_buf[0..8].try_into().unwrap());
-                let data_length = u64::from_be_bytes(metadata_buf[8..16].try_into().unwrap());
-                assert!(data_length > 0);
-
-                data_file.seek(SeekFrom::Start(data_offset))?;
-
-                let mut data_buf = vec![0; data_length as usize];
-                data_file.read_exact(&mut data_buf)?;
-
-                let record = Record::deserialize(&data_buf);
-                records.push(record);
-
-                current_metadata_offset = new_metadata_offset + row_length;
-            }
-
-            metadata_file.unlock()?;
-            data_file.unlock()?;
-        }
-
-        Ok(records)
-    }
-
     pub fn range_by<B: RangeBounds<Value>>(
         &mut self,
         field: &R::Field,
@@ -727,7 +677,11 @@ impl<R: Recordable> DB<R> {
             self.secondary_memtables[index].range(indexable_bounds)
         };
 
-        self.read_log_keys(log_keys.into_iter())
+        let log_key_batches = log_keys.into_iter().map(|log_key| (0, log_key));
+
+        let tagged_records = self.read_tagged_log_keys(log_key_batches);
+
+        Ok(tagged_records?.into_iter().map(|(_, rec)| rec).collect())
     }
 
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
