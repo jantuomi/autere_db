@@ -617,3 +617,36 @@ fn test_range_by_id() {
 
     assert_eq!(received_ids, vec![3, 4, 5, 6, 7, 8, 9]);
 }
+
+#[test]
+fn test_batch_find_by() {
+    let data_dir = tmp_dir();
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    let inserted_ids = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    for id in inserted_ids.iter() {
+        db.upsert(Inst {
+            id: *id,
+            name: Some("Foobar".to_string()),
+            data: vec![],
+        })
+        .unwrap();
+    }
+
+    let batch: Vec<Value> = (2..5).map(Value::Int).collect();
+    let result = db.batch_find_by(&Field::Id, &batch).unwrap();
+
+    assert_eq!(result.len(), batch.len());
+    assert_eq!(
+        result.iter().map(|(tag, _)| *tag).collect::<Vec<usize>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        result.iter().map(|(_, inst)| inst.id).collect::<Vec<i64>>(),
+        vec![2, 3, 4]
+    );
+}
