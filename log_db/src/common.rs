@@ -1,5 +1,6 @@
 use fs2::{lock_contended_error, FileExt};
 use once_cell::sync::Lazy;
+use rust_decimal::Decimal;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -30,7 +31,7 @@ pub const TEST_RESOURCES_DIR: &str = "tests/resources";
 // Serialized value tags
 pub const B_NULL: u8 = 0x0;
 pub const B_INT: u8 = 0x1;
-pub const B_FLOAT: u8 = 0x2;
+pub const B_DECIMAL: u8 = 0x2;
 pub const B_STRING: u8 = 0x3;
 pub const B_BYTES: u8 = 0x4;
 // Tombstone marker tags
@@ -229,6 +230,7 @@ impl Display for WriteDurability {
 pub enum IndexableValue {
     Null,
     Int(i64),
+    Decimal(Decimal),
     String(String),
 }
 
@@ -236,7 +238,7 @@ pub enum IndexableValue {
 #[derive(Debug, Clone)]
 pub enum PrimValueType {
     Int,
-    Float,
+    Decimal,
     String,
     Bytes,
 }
@@ -256,9 +258,9 @@ impl ValueType {
         }
     }
 
-    pub fn float() -> Self {
+    pub fn decimal() -> Self {
         ValueType {
-            prim_value_type: PrimValueType::Float,
+            prim_value_type: PrimValueType::Decimal,
             nullable: false,
         }
     }
@@ -288,7 +290,7 @@ impl ValueType {
 pub enum Value {
     Null,
     Int(i64),
-    Float(f64),
+    Decimal(Decimal),
     String(String),
     Bytes(Vec<u8>),
 }
@@ -297,7 +299,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Decimal(a), Value::Decimal(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -315,25 +317,25 @@ impl Value {
             }
             Value::Int(i) => {
                 let mut bytes = vec![B_INT];
-                bytes.extend(&i.to_be_bytes());
+                bytes.extend(i.to_be_bytes());
                 bytes
             }
-            Value::Float(f) => {
-                let mut bytes = vec![B_FLOAT];
-                bytes.extend(&f.to_be_bytes());
+            Value::Decimal(d) => {
+                let mut bytes = vec![B_DECIMAL];
+                bytes.extend(d.serialize()); // 16 bytes
                 bytes
             }
             Value::String(s) => {
                 let mut bytes = vec![B_STRING];
                 let length = s.len() as u64;
-                bytes.extend(&length.to_be_bytes());
+                bytes.extend(length.to_be_bytes());
                 bytes.extend(s.as_bytes());
                 bytes
             }
             Value::Bytes(b) => {
                 let mut bytes = vec![B_BYTES];
                 let length = b.len() as u64;
-                bytes.extend(&length.to_be_bytes());
+                bytes.extend(length.to_be_bytes());
                 bytes.extend(b);
                 bytes
             }
@@ -350,10 +352,10 @@ impl Value {
                 int_bytes.copy_from_slice(&bytes[1..1 + 8]);
                 (Value::Int(i64::from_be_bytes(int_bytes)), 1 + 8)
             }
-            B_FLOAT => {
-                let mut float_bytes = [0; 8];
-                float_bytes.copy_from_slice(&bytes[1..1 + 8]);
-                (Value::Float(f64::from_be_bytes(float_bytes)), 1 + 8)
+            B_DECIMAL => {
+                let mut decimal_bytes = [0; 16];
+                decimal_bytes.copy_from_slice(&bytes[1..1 + 16]);
+                (Value::Decimal(Decimal::deserialize(decimal_bytes)), 1 + 16)
             }
             B_STRING => {
                 let length_bytes = &bytes[1..1 + 8];
@@ -381,6 +383,7 @@ impl Value {
         match self {
             Value::Null => Some(IndexableValue::Null),
             Value::Int(i) => Some(IndexableValue::Int(*i)),
+            Value::Decimal(d) => Some(IndexableValue::Decimal(d.clone())),
             Value::String(s) => Some(IndexableValue::String(s.clone())),
             _ => None,
         }
@@ -397,9 +400,9 @@ pub fn type_check(value: &Value, value_type: &ValueType) -> bool {
             },
         ) => true,
         (
-            Value::Float(_),
+            Value::Decimal(_),
             ValueType {
-                prim_value_type: PrimValueType::Float,
+                prim_value_type: PrimValueType::Decimal,
                 ..
             },
         ) => true,
@@ -427,14 +430,6 @@ pub fn get_secondary_memtable_index_by_field<Field: Eq>(
     field: &Field,
 ) -> Option<usize> {
     sks.iter().position(|schema_field| schema_field == field)
-}
-
-/// A path to a log segment file along with its type
-pub enum SegmentPath {
-    /// A symbolic link to the active log file
-    ActiveSymlink(String),
-    /// A compacted segment that is no longer being written to
-    Compacted(String),
 }
 
 pub fn is_file_same_as_path(file: &File, path: &PathBuf) -> io::Result<bool> {
