@@ -335,3 +335,32 @@ The following actions are performed per API function:
 4. Write record to log file
 
 Note that writes have nothing to do with memtable indexes.
+
+## 2025-01-17 Batch API & transactions
+
+The user should be able to perform batch operations with the following API functions:
+
+- `batch_find_by(field, keys)`: Find multiple records by sequence of keys
+- `batch_upsert(records)`: Insert or update multiple records
+
+The single record API functions are implemented as special cases of the batch functions.
+
+These operations have overlap with the planned transaction API, which allows you to group multiple operations which
+will be executed with a single FS write. The transaction API will be implemented as follows:
+
+- `transact()`: Start a new transaction, exclusively locking the database
+- `commit()`: Commit the transaction, writing all changes to the log in one go
+- `rollback()`: Roll back the transaction, discarding all changes
+
+All interim writes and deletes are recorded into a sequence. Reads are done as normal, and reflect the state of the
+database as it was at the time of the `transact()` call.
+
+## 2025-01-17 Locking mechanism
+
+Working with the current locking system, where each segment file that is accessed is locked separately, is cumbersome
+and error-prone. It can also lead to a lot of lock acquisitions (FS operations) upon reads. Considering the
+requirements of the upcoming transaction API, a simpler locking mechanism is needed.
+
+The new locking mechanism will be based on a single lock file that is locked either exclusively or in shared mode. The lock file is used for all concurrency handling, even initialization of the DB. As such, it should be the first file to be added to the database directory. This also reduces the number of "do I have the most up to date file locked" checks.
+
+Using a single lock file relies on more cooperation and well-behavedness of the processes accessing the database, since the lock system won't protect from accesses without the lock. This is a trade-off for simplicity and performance.
