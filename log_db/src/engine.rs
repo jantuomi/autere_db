@@ -78,8 +78,8 @@ impl<R: Recordable> Engine<R> {
                 DBError::ValidationError("Key must be present in the field schema".to_owned()),
             )?;
 
-            match value_type.prim_value_type {
-                PrimValueType::Int | PrimValueType::String => {}
+            match value_type.primitive {
+                PrimitiveType::Int | PrimitiveType::String => {}
                 _ => return Err(DBError::ValidationError("Key must be indexable".to_owned())),
             }
         }
@@ -454,9 +454,9 @@ impl<R: Recordable> Engine<R> {
     ) -> DBResult<Vec<Record>> {
         fn range_bound_to_indexable(
             bound: Bound<&Value>,
-            field_type: &ValueType,
+            field_type: &Type,
         ) -> DBResult<Bound<IndexableValue>> {
-            fn convert(value: &Value, field_type: &ValueType) -> DBResult<IndexableValue> {
+            fn convert(value: &Value, field_type: &Type) -> DBResult<IndexableValue> {
                 if !type_check(&value, field_type) {
                     return Err(DBError::ValidationError(format!(
                         "Queried value does not match type: {:?}",
@@ -737,7 +737,7 @@ impl<R: Recordable> Engine<R> {
     }
 
     #[inline]
-    fn get_field_type(&self, field: &R::Field) -> Option<&ValueType> {
+    fn get_field_type(&self, field: &R::Field) -> Option<&Type> {
         self.config
             .fields
             .iter()

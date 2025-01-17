@@ -74,7 +74,7 @@ impl<R: Recordable> ConfigBuilder<R> {
 
 #[derive(Clone)]
 pub struct Config<R: Recordable> {
-    pub fields: Vec<(R::Field, ValueType)>,
+    pub fields: Vec<(R::Field, Type)>,
     pub primary_key: R::Field,
     pub secondary_keys: Vec<R::Field>,
     pub data_dir: String,

@@ -20,10 +20,11 @@ mod memtable_primary;
 mod memtable_secondary;
 mod record;
 
-pub use common::*;
+pub use common::{DBError, DBResult, Type, Value};
 pub use config::{ReadConsistency, WriteDurability};
 pub use record::Recordable;
 
+use common::*;
 use config::*;
 use engine::*;
 use log_reader_forward::*;
@@ -198,8 +199,8 @@ mod tests {
 
     impl Recordable for TestInst1 {
         type Field = Field;
-        fn schema() -> Vec<(Field, ValueType)> {
-            vec![(Field::Id, ValueType::int())]
+        fn schema() -> Vec<(Field, Type)> {
+            vec![(Field::Id, Type::int())]
         }
         fn primary_key() -> Self::Field {
             Field::Id
@@ -252,11 +253,8 @@ mod tests {
             }
         }
 
-        fn schema() -> Vec<(Field, ValueType)> {
-            vec![
-                (Field::Id, ValueType::int()),
-                (Field::Name, ValueType::string()),
-            ]
+        fn schema() -> Vec<(Field, Type)> {
+            vec![(Field::Id, Type::int()), (Field::Name, Type::string())]
         }
     }
 

@@ -49,7 +49,7 @@ impl Record {
         &self.values[index]
     }
 
-    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> DBResult<()> {
+    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, Type)>) -> DBResult<()> {
         // Validate the record length
         if self.values.len() != schema.len() {
             return Err(DBError::ValidationError(format!(
@@ -64,36 +64,36 @@ impl Record {
             match (&self.values[i], field) {
                 (
                     Value::Null,
-                    ValueType {
+                    Type {
                         nullable: true,
-                        prim_value_type: _,
+                        primitive: _,
                     },
                 ) => {}
                 (
                     Value::Int(_),
-                    ValueType {
-                        prim_value_type: PrimValueType::Int,
+                    Type {
+                        primitive: PrimitiveType::Int,
                         ..
                     },
                 ) => {}
                 (
                     Value::String(_),
-                    ValueType {
-                        prim_value_type: PrimValueType::String,
+                    Type {
+                        primitive: PrimitiveType::String,
                         ..
                     },
                 ) => {}
                 (
                     Value::Bytes(_),
-                    ValueType {
-                        prim_value_type: PrimValueType::Bytes,
+                    Type {
+                        primitive: PrimitiveType::Bytes,
                         ..
                     },
                 ) => {}
                 _ => {
                     return Err(DBError::ValidationError(format!(
                         "Record field {} has incorrect type: {:?}, expected {:?}",
-                        &i, &self.values[i], &field.prim_value_type
+                        &i, &self.values[i], &field.primitive
                     )));
                 }
             }
@@ -107,7 +107,7 @@ pub trait Recordable {
     /// The field type of the data structure implementing the `Recordable` trait.
     type Field: Eq + Clone + Debug;
     /// Define the schema of the instance implementing the `Recordable` trait.
-    fn schema() -> Vec<(Self::Field, ValueType)>;
+    fn schema() -> Vec<(Self::Field, Type)>;
     /// Define the primary key of the instance implementing the `Recordable` trait.
     fn primary_key() -> Self::Field;
     /// Define the secondary keys of the instance implementing the `Recordable` trait.

@@ -44,11 +44,11 @@ struct Inst {
 
 impl Recordable for Inst {
     type Field = Field;
-    fn schema() -> Vec<(Self::Field, ValueType)> {
+    fn schema() -> Vec<(Self::Field, Type)> {
         vec![
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string().nullable()),
-            (Field::Data, ValueType::bytes()),
+            (Field::Id, Type::int()),
+            (Field::Name, Type::string().nullable()),
+            (Field::Data, Type::bytes()),
         ]
     }
     fn primary_key() -> Self::Field {
@@ -188,8 +188,8 @@ fn test_get_nonexistant() {
 struct InstTestNullable {}
 impl Recordable for InstTestNullable {
     type Field = Field;
-    fn schema() -> Vec<(Self::Field, ValueType)> {
-        vec![(Field::Id, ValueType::int())]
+    fn schema() -> Vec<(Self::Field, Type)> {
+        vec![(Field::Id, Type::int())]
     }
     fn primary_key() -> Self::Field {
         Field::Id
@@ -219,11 +219,8 @@ fn test_upsert_fails_on_null_in_non_nullable_field() {
 struct InstTestNumValues {}
 impl Recordable for InstTestNumValues {
     type Field = Field;
-    fn schema() -> Vec<(Self::Field, ValueType)> {
-        vec![
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-        ]
+    fn schema() -> Vec<(Self::Field, Type)> {
+        vec![(Field::Id, Type::int()), (Field::Name, Type::string())]
     }
     fn primary_key() -> Self::Field {
         Field::Id
@@ -253,8 +250,8 @@ fn test_upsert_fails_on_invalid_number_of_values() {
 struct InstTestInvalidType {}
 impl Recordable for InstTestInvalidType {
     type Field = Field;
-    fn schema() -> Vec<(Self::Field, ValueType)> {
-        vec![(Field::Id, ValueType::int())]
+    fn schema() -> Vec<(Self::Field, Type)> {
+        vec![(Field::Id, Type::int())]
     }
     fn primary_key() -> Self::Field {
         Field::Id
@@ -325,8 +322,8 @@ struct InstSingleId {
 
 impl Recordable for InstSingleId {
     type Field = Field;
-    fn schema() -> Vec<(Self::Field, ValueType)> {
-        vec![(Field::Id, ValueType::int())]
+    fn schema() -> Vec<(Self::Field, Type)> {
+        vec![(Field::Id, Type::int())]
     }
     fn primary_key() -> Self::Field {
         Field::Id

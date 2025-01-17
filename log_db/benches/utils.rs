@@ -18,11 +18,11 @@ pub struct Inst {
 }
 impl Recordable for Inst {
     type Field = Field;
-    fn schema() -> Vec<(Field, ValueType)> {
+    fn schema() -> Vec<(Field, Type)> {
         vec![
-            (Field::Id, ValueType::int()),
-            (Field::Name, ValueType::string()),
-            (Field::Data, ValueType::bytes()),
+            (Field::Id, Type::int()),
+            (Field::Name, Type::string()),
+            (Field::Data, Type::bytes()),
         ]
     }
     fn primary_key() -> Self::Field {

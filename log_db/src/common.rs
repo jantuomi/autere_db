@@ -210,7 +210,7 @@ pub enum IndexableValue {
 
 /// A primitive type
 #[derive(Debug, Clone)]
-pub enum PrimValueType {
+pub enum PrimitiveType {
     Int,
     Decimal,
     String,
@@ -219,36 +219,36 @@ pub enum PrimValueType {
 
 /// A primitive type + a nullability bit
 #[derive(Debug, Clone)]
-pub struct ValueType {
-    pub prim_value_type: PrimValueType,
+pub struct Type {
+    pub primitive: PrimitiveType,
     pub nullable: bool,
 }
 
-impl ValueType {
+impl Type {
     pub fn int() -> Self {
-        ValueType {
-            prim_value_type: PrimValueType::Int,
+        Type {
+            primitive: PrimitiveType::Int,
             nullable: false,
         }
     }
 
     pub fn decimal() -> Self {
-        ValueType {
-            prim_value_type: PrimValueType::Decimal,
+        Type {
+            primitive: PrimitiveType::Decimal,
             nullable: false,
         }
     }
 
     pub fn string() -> Self {
-        ValueType {
-            prim_value_type: PrimValueType::String,
+        Type {
+            primitive: PrimitiveType::String,
             nullable: false,
         }
     }
 
     pub fn bytes() -> Self {
-        ValueType {
-            prim_value_type: PrimValueType::Bytes,
+        Type {
+            primitive: PrimitiveType::Bytes,
             nullable: false,
         }
     }
@@ -364,37 +364,37 @@ impl Value {
     }
 }
 
-pub fn type_check(value: &Value, value_type: &ValueType) -> bool {
+pub fn type_check(value: &Value, value_type: &Type) -> bool {
     match (value, value_type) {
         (
             Value::Int(_),
-            ValueType {
-                prim_value_type: PrimValueType::Int,
+            Type {
+                primitive: PrimitiveType::Int,
                 ..
             },
         ) => true,
         (
             Value::Decimal(_),
-            ValueType {
-                prim_value_type: PrimValueType::Decimal,
+            Type {
+                primitive: PrimitiveType::Decimal,
                 ..
             },
         ) => true,
         (
             Value::Bytes(_),
-            ValueType {
-                prim_value_type: PrimValueType::Bytes,
+            Type {
+                primitive: PrimitiveType::Bytes,
                 ..
             },
         ) => true,
         (
             Value::String(_),
-            ValueType {
-                prim_value_type: PrimValueType::String,
+            Type {
+                primitive: PrimitiveType::String,
                 ..
             },
         ) => true,
-        (Value::Null, ValueType { nullable: true, .. }) => true,
+        (Value::Null, Type { nullable: true, .. }) => true,
         _ => false,
     }
 }
