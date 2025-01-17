@@ -49,7 +49,7 @@ impl Record {
         &self.values[index]
     }
 
-    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> Result<(), DBError> {
+    pub fn validate<Field: Eq>(&self, schema: &Vec<(Field, ValueType)>) -> DBResult<()> {
         // Validate the record length
         if self.values.len() != schema.len() {
             return Err(DBError::ValidationError(format!(

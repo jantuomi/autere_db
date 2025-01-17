@@ -90,7 +90,7 @@ pub fn prefill_db(
     insts: &mut Vec<Inst>,
     n_records: usize,
     compact: bool,
-) -> Result<(), DBError> {
+) -> DBResult<()> {
     for i in 0..(n_records - insts.len()) {
         let inst = random_inst(0, n_records as i64);
         insts.push(inst.clone());

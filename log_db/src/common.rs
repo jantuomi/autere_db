@@ -42,10 +42,12 @@ pub fn metadata_filename(num: u16) -> String {
     format!("metadata.{}", num)
 }
 
+pub type DBResult<A> = Result<A, DBError>;
+
 #[derive(Debug, Error)]
 pub enum DBError {
     #[error("lock request failed: {0}")]
-    LockRequestError(#[from] LockRequestError),
+    LockRequestError(String),
     #[error("validation failed: {0}")]
     ValidationError(String),
     #[error("consistency check failed: {0}")]
@@ -432,7 +434,7 @@ pub fn get_secondary_memtable_index_by_field<Field: Eq>(
     sks.iter().position(|schema_field| schema_field == field)
 }
 
-pub fn is_file_same_as_path(file: &File, path: &PathBuf) -> io::Result<bool> {
+pub fn is_file_same_as_path(file: &File, path: &PathBuf) -> DBResult<bool> {
     // Get the metadata for the open file handle
     let file_metadata = file.metadata()?;
 
@@ -468,7 +470,7 @@ pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
 }
 
 /// Set the active segment to the segment with the given ordinal number.
-pub fn set_active_segment(data_dir_path: &Path, segment_num: u16) -> Result<(), io::Error> {
+pub fn set_active_segment(data_dir_path: &Path, segment_num: u16) -> DBResult<()> {
     let tmp_uuid = Uuid::new_v4();
     let tmp_filename = format!("active_{}", tmp_uuid.to_string());
     let tmp_path = data_dir_path.join(tmp_filename);
@@ -489,7 +491,7 @@ pub fn set_active_segment(data_dir_path: &Path, segment_num: u16) -> Result<(), 
 pub fn create_segment_metadata_file(
     data_dir_path: &Path,
     data_file_uuid: &Uuid,
-) -> Result<(u16, PathBuf), io::Error> {
+) -> DBResult<(u16, PathBuf)> {
     let current_greatest_num = greatest_segment_number(data_dir_path)?;
     let new_num = current_greatest_num + 1;
 
@@ -514,7 +516,7 @@ pub fn create_segment_metadata_file(
 }
 
 /// Parse the segment number from a metadata file path
-pub fn parse_segment_number(metadata_path: &Path) -> Result<u16, io::Error> {
+pub fn parse_segment_number(metadata_path: &Path) -> DBResult<u16> {
     let filename = metadata_path
         .file_name()
         .expect("No filename in symlink")
@@ -529,17 +531,14 @@ pub fn parse_segment_number(metadata_path: &Path) -> Result<u16, io::Error> {
         .parse::<u16>();
 
     segment_number.map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Failed to parse segment number from filename",
-        )
+        DBError::ValidationError("Failed to parse segment number from filename".to_owned())
     })
 }
 
 /// Get the number of the segment with the greatest ordinal.
 /// This is the newest segment, i.e. the one that is pointed to by the `active` symlink.
 /// If there are no segments yet, returns 0.
-pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
+pub fn greatest_segment_number(data_dir_path: &Path) -> DBResult<u16> {
     let active_symlink = data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
 
     if !fs::exists(&active_symlink)? {
@@ -553,7 +552,7 @@ pub fn greatest_segment_number(data_dir_path: &Path) -> Result<u16, io::Error> {
 /// Create a new segment data file and return its UUID.
 /// A data file contains the segment data, tightly packed without separators.
 /// An accompanying metadata file is required to interpret the data.
-pub fn create_segment_data_file(data_dir_path: &Path) -> Result<(Uuid, PathBuf), io::Error> {
+pub fn create_segment_data_file(data_dir_path: &Path) -> DBResult<(Uuid, PathBuf)> {
     let uuid = Uuid::new_v4();
     let new_segment_path = data_dir_path.join(uuid.to_string());
     fs::OpenOptions::new()
@@ -567,7 +566,7 @@ pub fn create_segment_data_file(data_dir_path: &Path) -> Result<(Uuid, PathBuf),
 
 /// Reads the metadata header from the metadata file.
 /// Leaves the file seek head at the beginning of the records, after the header.
-pub fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHeader, io::Error> {
+pub fn read_metadata_header(metadata_file: &mut fs::File) -> DBResult<MetadataHeader> {
     metadata_file.seek(SeekFrom::Start(0))?;
     let mut buf = [0u8; METADATA_FILE_HEADER_SIZE];
     metadata_file.read_exact(&mut buf)?;
@@ -576,7 +575,7 @@ pub fn read_metadata_header(metadata_file: &mut fs::File) -> Result<MetadataHead
     Ok(header)
 }
 
-pub fn validate_metadata_header(header: &MetadataHeader) -> Result<(), DBError> {
+pub fn validate_metadata_header(header: &MetadataHeader) -> DBResult<()> {
     if header.version != 1 {
         return Err(DBError::ValidationError(
             "Unsupported metadata file version".to_owned(),
@@ -592,9 +591,7 @@ pub enum IsMetadatafileValidResult {
     TruncateToSize(u64),
 }
 
-pub fn is_metadata_file_valid(
-    metadata_file: &mut fs::File,
-) -> Result<IsMetadatafileValidResult, io::Error> {
+pub fn is_metadata_file_valid(metadata_file: &mut fs::File) -> DBResult<IsMetadatafileValidResult> {
     let size = metadata_file.seek(SeekFrom::End(0))? as usize;
 
     if size < METADATA_FILE_HEADER_SIZE {
@@ -626,7 +623,7 @@ pub fn is_metadata_file_valid(
 pub fn ensure_active_metadata_is_valid(
     data_dir: &Path,
     metadata_file: &mut fs::File,
-) -> Result<bool, io::Error> {
+) -> DBResult<bool> {
     let current_len = metadata_file.seek(SeekFrom::End(0))? as usize;
 
     match is_metadata_file_valid(metadata_file)? {
@@ -683,18 +680,8 @@ pub fn ensure_active_metadata_is_valid(
 
 const LOCK_WAIT_MAX_MS: u64 = 1000;
 
-#[derive(Error, Debug)]
-pub enum LockRequestError {
-    #[error("lock request file was removed unexpectedly")]
-    LockRequestFileRemoved,
-    #[error("timed out while waiting for a lock, max wait time: {0} ms")]
-    TimedOut(u64),
-    #[error("unexpected IO error: {0}")]
-    IOError(#[from] io::Error),
-}
-
-pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, LockRequestError> {
     let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
+pub fn is_exclusive_lock_requested(data_dir: &Path) -> DBResult<bool> {
     let lock_request_file = fs::OpenOptions::new()
         .create(true)
         .write(true) // When requesting a lock, we need to have either read or write permissions
@@ -707,14 +694,16 @@ pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, LockRequestE
             if e.kind() == lock_contended_error().kind() {
                 return Ok(true);
             }
-            return Err(LockRequestError::IOError(e));
+            return Err(DBError::IOError(e));
         }
 
         Ok(_) => {
             // Check that the exclusive lock request file is still the same as the one we opened
             if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
                 // The lock request file has been removed
-                return Err(LockRequestError::LockRequestFileRemoved);
+                return Err(DBError::ConsistencyError(
+                    "Lock request file was removed while checking for exclusive lock".to_owned(),
+                ));
             }
 
             lock_request_file.unlock()?;
@@ -723,7 +712,7 @@ pub fn is_exclusive_lock_requested(data_dir: &Path) -> Result<bool, LockRequestE
     }
 }
 
-pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), LockRequestError> {
+pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> DBResult<()> {
     let mut timeout = 5;
     loop {
         if is_exclusive_lock_requested(data_dir)? {
@@ -735,7 +724,9 @@ pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), L
             timeout *= 2;
 
             if timeout > LOCK_WAIT_MAX_MS {
-                return Err(LockRequestError::TimedOut(LOCK_WAIT_MAX_MS));
+                return Err(DBError::LockRequestError(
+                    "Acquisition of shared lock timed out after {LOCK_WAIT_MAX_MS}".to_owned(),
+                ));
             }
         } else {
             file.lock_shared()?;
@@ -744,7 +735,7 @@ pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), L
     }
 }
 
-pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> Result<(), io::Error> {
+pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> DBResult<()> {
     // Create a lock on the exclusive lock request file to signal to readers that they should wait
     let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
     let lock_request_file = fs::OpenOptions::new()

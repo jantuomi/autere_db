@@ -75,7 +75,7 @@ impl<R: Recordable> ConfigBuilder<R> {
         self
     }
 
-    pub fn initialize(&self) -> Result<DB<R>, DBError> {
+    pub fn initialize(&self) -> DBResult<DB<R>> {
         let config = Config {
             fields: R::schema(),
             primary_key: R::primary_key(),
@@ -125,7 +125,7 @@ impl<R: Recordable> DB<R> {
         ConfigBuilder::new()
     }
 
-    fn initialize(config: Config<R>) -> Result<DB<R>, DBError> {
+    fn initialize(config: Config<R>) -> DBResult<DB<R>> {
         info!("Initializing DB...");
         // If data_dir does not exist or is empty, create it and any necessary files
         // After creation, the directory should always be in a complete state
@@ -234,7 +234,7 @@ impl<R: Recordable> DB<R> {
 
     /// Refresh the in-memory indexes from the log files.
     /// This needs to only be called if the read consistency is set to `ReadConsistency::Eventual`.
-    pub fn refresh_indexes(&mut self) -> Result<(), DBError> {
+    pub fn refresh_indexes(&mut self) -> DBResult<()> {
         let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
         let active_target = fs::read_link(active_symlink_path)?;
         let active_metadata_path = self.data_dir.join(active_target);
@@ -256,8 +256,7 @@ impl<R: Recordable> DB<R> {
                 )));
             }
 
-            request_shared_lock(&self.data_dir, &mut metadata_file)
-                .map_err(|lre| DBError::LockRequestError(lre))?;
+            request_shared_lock(&self.data_dir, &mut metadata_file)?;
 
             let metadata_header = read_metadata_header(&mut metadata_file)?;
             validate_metadata_header(&metadata_header)?;
@@ -333,7 +332,7 @@ impl<R: Recordable> DB<R> {
 
     /// Insert a record into the database. If the primary key value already exists,
     /// the existing record will be replaced by the supplied one.
-    pub fn upsert(&mut self, recordable: R) -> Result<(), DBError> {
+    pub fn upsert(&mut self, recordable: R) -> DBResult<()> {
         let record = Record::from(&recordable.into_record());
         debug!("Upserting record: {:?}", record);
 
@@ -345,7 +344,7 @@ impl<R: Recordable> DB<R> {
 
     /// Insert a batch of records into the database. If the primary key value for a record already exists,
     /// the existing record will be replaced by the supplied one. Records are inserted in the order they are given.
-    pub fn batch_upsert(&mut self, recordables: Vec<R>) -> Result<(), DBError> {
+    pub fn batch_upsert(&mut self, recordables: Vec<R>) -> DBResult<()> {
         let records = recordables
             .into_iter()
             .map(|r| Record::from(&r.into_record()))
@@ -360,10 +359,7 @@ impl<R: Recordable> DB<R> {
         self.batch_upsert_records(records.into_iter())
     }
 
-    fn batch_upsert_records(
-        &mut self,
-        records: impl Iterator<Item = Record>,
-    ) -> Result<(), DBError> {
+    fn batch_upsert_records(&mut self, records: impl Iterator<Item = Record>) -> DBResult<()> {
         debug!("Opening file in append mode and acquiring exclusive lock...");
 
         // Acquire an exclusive lock for writing
@@ -444,7 +440,7 @@ impl<R: Recordable> DB<R> {
 
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
-    pub fn get(&mut self, value: &Value) -> Result<Option<R>, DBError> {
+    pub fn get(&mut self, value: &Value) -> DBResult<Option<R>> {
         let value_batch = std::iter::once(value);
         let records = self.batch_find_by_records(&self.config.primary_key.clone(), value_batch)?;
         assert!(records.len() <= 1);
@@ -457,7 +453,7 @@ impl<R: Recordable> DB<R> {
 
     /// Get a collection of records based on a field value.
     /// Indexes will be used if they are applicable.
-    pub fn find_by(&mut self, field: &R::Field, value: &Value) -> Result<Vec<R>, DBError> {
+    pub fn find_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
         let value_batch = std::iter::once(value);
         Ok(self
             .batch_find_by_records(field, value_batch)?
@@ -474,7 +470,7 @@ impl<R: Recordable> DB<R> {
         &mut self,
         field: &R::Field,
         values: &[Value],
-    ) -> Result<Vec<(usize, R)>, DBError> {
+    ) -> DBResult<Vec<(usize, R)>> {
         Ok(self
             .batch_find_by_records(field, values.iter())?
             .into_iter()
@@ -486,7 +482,7 @@ impl<R: Recordable> DB<R> {
         &mut self,
         field: &R::Field,
         values: impl Iterator<Item = &'a Value>,
-    ) -> Result<Vec<(usize, Record)>, DBError> {
+    ) -> DBResult<Vec<(usize, Record)>> {
         let field_type = self.get_field_type(field).ok_or(DBError::ValidationError(
             "Field not found in schema".to_owned(),
         ))?;
@@ -504,7 +500,7 @@ impl<R: Recordable> DB<R> {
                     )))
                 }
             })
-            .collect::<Result<Vec<IndexableValue>, DBError>>()?;
+            .collect::<DBResult<Vec<IndexableValue>>>()?;
 
         // Otherwise, continue with querying secondary indexes.
         debug!(
@@ -546,7 +542,7 @@ impl<R: Recordable> DB<R> {
                     Ok(log_keys)
                 }
             })
-            .collect::<Result<Vec<Vec<&LogKey>>, DBError>>()?;
+            .collect::<DBResult<Vec<Vec<&LogKey>>>>()?;
 
         debug!("Found log keys in memtable: {:?}", log_key_batches);
 
@@ -570,7 +566,7 @@ impl<R: Recordable> DB<R> {
     fn read_tagged_log_keys<'a>(
         &self,
         log_keys: impl Iterator<Item = (usize, &'a LogKey)>,
-    ) -> Result<Vec<(usize, Record)>, DBError> {
+    ) -> DBResult<Vec<(usize, Record)>> {
         let mut records = vec![];
         let mut log_keys_map = BTreeMap::new();
 
@@ -636,7 +632,7 @@ impl<R: Recordable> DB<R> {
         &mut self,
         field: &R::Field,
         range: B,
-    ) -> Result<Vec<R>, DBError> {
+    ) -> DBResult<Vec<R>> {
         Ok(self
             .range_by_records(field, range)?
             .into_iter()
@@ -648,12 +644,12 @@ impl<R: Recordable> DB<R> {
         &mut self,
         field: &R::Field,
         range: B,
-    ) -> Result<Vec<Record>, DBError> {
+    ) -> DBResult<Vec<Record>> {
         fn range_bound_to_indexable(
             bound: Bound<&Value>,
             field_type: &ValueType,
-        ) -> Result<Bound<IndexableValue>, DBError> {
-            fn convert(value: &Value, field_type: &ValueType) -> Result<IndexableValue, DBError> {
+        ) -> DBResult<Bound<IndexableValue>> {
+            fn convert(value: &Value, field_type: &ValueType) -> DBResult<IndexableValue> {
                 if !type_check(&value, field_type) {
                     return Err(DBError::ValidationError(format!(
                         "Queried value does not match type: {:?}",
@@ -706,7 +702,7 @@ impl<R: Recordable> DB<R> {
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.
     /// If the segment has been rotated, the handle will be closed and reopened.
     /// Returns `false` if the file has been rotated and the handle has been reopened, `true` otherwise.
-    fn ensure_metadata_file_is_active(&mut self) -> Result<bool, DBError> {
+    fn ensure_metadata_file_is_active(&mut self) -> DBResult<bool> {
         let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
         let active_metadata_path = &self.data_dir.join(active_target);
 
@@ -738,7 +734,7 @@ impl<R: Recordable> DB<R> {
     ///
     /// Deletion is done by marking the record as a tombstone. The record will still be present in the log file,
     /// but will be ignored by reads. Upon compaction, tombstoned records will be removed.
-    pub fn delete_by(&mut self, field: &R::Field, value: &Value) -> Result<Vec<R>, DBError> {
+    pub fn delete_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
         let recs = self.delete_by_field(field, value)?;
 
         Ok(recs
@@ -748,7 +744,7 @@ impl<R: Recordable> DB<R> {
     }
 
     /// Delete record by primary key.
-    pub fn delete(&mut self, pk: &Value) -> Result<Option<R>, DBError> {
+    pub fn delete(&mut self, pk: &Value) -> DBResult<Option<R>> {
         let recs = self.delete_by_field(&self.config.primary_key.clone(), pk)?;
         assert!(recs.len() <= 1);
 
@@ -758,7 +754,7 @@ impl<R: Recordable> DB<R> {
             .map(|rec| R::from_record(rec.values)))
     }
 
-    fn delete_by_field(&mut self, field: &R::Field, value: &Value) -> Result<Vec<Record>, DBError> {
+    fn delete_by_field(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<Record>> {
         let value_batch = std::iter::once(value);
         let recs: Vec<Record> = self
             .batch_find_by_records(field, value_batch)?
@@ -822,7 +818,7 @@ impl<R: Recordable> DB<R> {
     /// Note that this function is synchronous and may block for a relatively long time.
     /// You may call this function in a separate thread or process to avoid blocking the main thread.
     /// However, the database will be exclusively locked, so all writes and reads will be blocked during the tasks.
-    pub fn do_maintenance_tasks(&mut self) -> Result<(), DBError> {
+    pub fn do_maintenance_tasks(&mut self) -> DBResult<()> {
         request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
 
         ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?;
@@ -837,7 +833,7 @@ impl<R: Recordable> DB<R> {
         Ok(())
     }
 
-    fn rotate_and_compact(&mut self) -> Result<(), io::Error> {
+    fn rotate_and_compact(&mut self) -> DBResult<()> {
         debug!("Active log size exceeds threshold, starting rotation and compaction...");
 
         self.active_data_file.lock_shared()?;
