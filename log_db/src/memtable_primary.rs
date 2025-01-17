@@ -19,8 +19,8 @@ impl PrimaryMemtable {
         }
     }
 
-    pub fn set(&mut self, key: &IndexableValue, value: &LogKey) {
-        self.records.insert(key.clone(), value.clone());
+    pub fn set(&mut self, key: IndexableValue, value: LogKey) {
+        self.records.insert(key, value);
     }
 
     pub fn get(&self, key: &IndexableValue) -> Option<&LogKey> {
@@ -31,10 +31,10 @@ impl PrimaryMemtable {
         self.records.remove(key)
     }
 
-    pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<LogKey> {
+    pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<&LogKey> {
         self.records
             .range(range)
-            .map(|(_, log_key)| log_key.clone())
+            .map(|(_, log_key)| log_key)
             .collect()
     }
 }

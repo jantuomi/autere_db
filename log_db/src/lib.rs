@@ -4,7 +4,6 @@ extern crate log;
 #[macro_use]
 mod common;
 mod log_reader_forward;
-mod log_reader_reverse;
 mod memtable_primary;
 mod memtable_secondary;
 mod record;
@@ -13,7 +12,6 @@ pub use common::*;
 use fs2::FileExt;
 pub use log_reader_forward::ForwardLogReader;
 use log_reader_forward::ForwardLogReaderItem;
-pub use log_reader_reverse::ReverseLogReader;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
 pub use record::Recordable;
@@ -275,7 +273,7 @@ impl<R: Recordable> DB<R> {
                 if record.tombstone {
                     self.remove_record_from_memtables(&record);
                 } else {
-                    self.insert_record_to_memtables(&log_key, &record);
+                    self.insert_record_to_memtables(log_key, record);
                 }
 
                 // Update from_index in case this is the last iteration: we need to know the next
@@ -295,10 +293,7 @@ impl<R: Recordable> DB<R> {
         Ok(())
     }
 
-    fn insert_record_to_memtables(&mut self, log_key: &LogKey, record: &Record) {
-        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
-        self.primary_memtable.set(&pk, &log_key);
-
+    fn insert_record_to_memtables(&mut self, log_key: LogKey, record: Record) {
         for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
             let secondary_memtable = &mut self.secondary_memtables[sk_index];
             let sk_field_index = self
@@ -309,8 +304,12 @@ impl<R: Recordable> DB<R> {
                 .unwrap();
             let sk = record.at(sk_field_index).as_indexable().unwrap();
 
-            secondary_memtable.set(&sk, &log_key);
+            secondary_memtable.set(sk, log_key.clone());
         }
+
+        // Doing this last because this moves log_key
+        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+        self.primary_memtable.set(pk, log_key);
     }
 
     fn remove_record_from_memtables(&mut self, record: &Record) {
@@ -341,10 +340,30 @@ impl<R: Recordable> DB<R> {
         record.validate(&self.config.fields)?;
         debug!("Record is valid");
 
-        self.upsert_record(&record)
+        self.batch_upsert_records(std::iter::once(record))
     }
 
-    fn upsert_record(&mut self, record: &Record) -> Result<(), DBError> {
+    /// Insert a batch of records into the database. If the primary key value for a record already exists,
+    /// the existing record will be replaced by the supplied one. Records are inserted in the order they are given.
+    pub fn batch_upsert(&mut self, recordables: Vec<R>) -> Result<(), DBError> {
+        let records = recordables
+            .into_iter()
+            .map(|r| Record::from(&r.into_record()))
+            .collect::<Vec<Record>>();
+        debug!("Batch upserting {} records", records.len());
+
+        for record in &records {
+            record.validate(&self.config.fields)?;
+        }
+        debug!("Records are valid");
+
+        self.batch_upsert_records(records.into_iter())
+    }
+
+    fn batch_upsert_records(
+        &mut self,
+        records: impl Iterator<Item = Record>,
+    ) -> Result<(), DBError> {
         debug!("Opening file in append mode and acquiring exclusive lock...");
 
         // Acquire an exclusive lock for writing
@@ -355,7 +374,7 @@ impl<R: Recordable> DB<R> {
         {
             // The log file has been rotated, so we must try again
             self.active_metadata_file.unlock()?;
-            return self.upsert_record(record);
+            return self.batch_upsert_records(records);
         }
 
         self.active_data_file.lock_exclusive()?;
@@ -366,61 +385,59 @@ impl<R: Recordable> DB<R> {
 
         debug!("Exclusive lock acquired, appending to log file");
 
-        // Write the record to the log
-        let serialized = &record.serialize();
-        let record_offset = self.active_data_file.seek(SeekFrom::End(0))?;
-        let record_length = serialized.len() as u64;
-        assert!(record_length > 0);
+        let mut serialized_data: Vec<u8> = vec![];
+        let mut serialized_metadata: Vec<u8> = vec![];
+        let mut pending_memtable_insertions: Vec<(LogKey, Record)> = vec![];
+        for record in records {
+            // Write the record to the log
+            let serialized = &record.serialize();
+            let record_offset = self.active_data_file.seek(SeekFrom::End(0))?;
+            let record_length = serialized.len() as u64;
+            assert!(record_length > 0);
 
-        self.active_data_file.write_all(serialized)?;
+            serialized_data.extend(serialized);
 
-        // Flush and sync data to disk
+            let metadata_pos = self.active_metadata_file.seek(SeekFrom::End(0))?;
+            let metadata_index =
+                (metadata_pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
+
+            // Write the record metadata to the metadata file
+            let mut metadata_buf = vec![];
+            metadata_buf.extend(record_offset.to_be_bytes().into_iter());
+            metadata_buf.extend(record_length.to_be_bytes().into_iter());
+
+            assert_eq!(metadata_buf.len(), 16);
+
+            serialized_metadata.extend(metadata_buf);
+
+            let log_key = LogKey::new(segment_num, metadata_index);
+
+            pending_memtable_insertions.push((log_key, record));
+        }
+
+        self.active_data_file.write_all(&serialized_data)?;
+        self.active_metadata_file.write_all(&serialized_metadata)?;
+
+        // Flush and sync data and metadata to disk
         if self.config.write_durability == WriteDurability::Flush {
             self.active_data_file.flush()?;
-        }
-        if self.config.write_durability == WriteDurability::FlushSync {
+            self.active_metadata_file.flush()?;
+        } else if self.config.write_durability == WriteDurability::FlushSync {
             self.active_data_file.flush()?;
             self.active_data_file.sync_all()?;
-        }
-
-        let metadata_pos = self.active_metadata_file.seek(SeekFrom::End(0))?;
-        let metadata_index =
-            (metadata_pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
-
-        // Write the record metadata to the metadata file
-        let mut metadata_buf = vec![];
-        metadata_buf.extend(record_offset.to_be_bytes().into_iter());
-        metadata_buf.extend(record_length.to_be_bytes().into_iter());
-
-        assert_eq!(metadata_buf.len(), 16);
-        self.active_metadata_file.write_all(&metadata_buf)?;
-
-        // Flush and sync metadata to disk
-        if self.config.write_durability == WriteDurability::Flush {
-            self.active_metadata_file.flush()?;
-        }
-        if self.config.write_durability == WriteDurability::FlushSync {
             self.active_metadata_file.flush()?;
             self.active_metadata_file.sync_all()?;
         }
 
-        debug!("Record appended to log file, releasing locks");
+        debug!("Records appended to log file, releasing locks");
 
         // Manually release the locks because the file handles are left open
         self.active_data_file.unlock()?;
         self.active_metadata_file.unlock()?;
 
-        debug!("Update memtables with newly written data");
-        let log_key = LogKey::new(segment_num, metadata_index);
-
-        self.insert_record_to_memtables(&log_key, &record);
-
-        // These post-condition asserts feel like they sometimes report false positives.
-        let len = self.active_metadata_file.seek(SeekFrom::End(0))?;
-        assert!(len >= METADATA_FILE_HEADER_SIZE as u64);
-        assert_eq!((len - METADATA_FILE_HEADER_SIZE as u64) % 16, 0);
-        let data_file_len = self.active_data_file.seek(SeekFrom::End(0))?;
-        assert_eq!(data_file_len, record_offset + record_length);
+        for (log_key, record) in pending_memtable_insertions {
+            self.insert_record_to_memtables(log_key, record);
+        }
 
         Ok(())
     }
@@ -505,7 +522,7 @@ impl<R: Recordable> DB<R> {
                 if field == &self.config.primary_key {
                     let opt = self.primary_memtable.get(&query_key);
                     let log_keys = match opt {
-                        Some(log_key) => vec![log_key.clone()],
+                        Some(log_key) => vec![log_key],
                         None => vec![],
                     };
                     Ok(log_keys)
@@ -525,21 +542,23 @@ impl<R: Recordable> DB<R> {
                     let log_keys = self.secondary_memtables[smemtable_index]
                         .find_by(&query_key)
                         .into_iter()
-                        .cloned()
                         .collect();
                     Ok(log_keys)
                 }
             })
-            .collect::<Result<Vec<Vec<LogKey>>, DBError>>()?;
+            .collect::<Result<Vec<Vec<&LogKey>>, DBError>>()?;
 
         debug!("Found log keys in memtable: {:?}", log_key_batches);
 
-        let tagged = log_key_batches
-            .into_iter()
-            .enumerate()
-            .flat_map(|(tag, log_keys)| log_keys.into_iter().map(move |log_key| (tag, log_key)));
+        let mut tagged = vec![];
+        let mut tag: usize = 0;
+        for batch in log_key_batches {
+            let mapped = batch.into_iter().map(|log_key| (tag, log_key));
+            tagged.extend(mapped);
+            tag += 1;
+        }
 
-        let tagged_records = self.read_tagged_log_keys(tagged)?;
+        let tagged_records = self.read_tagged_log_keys(tagged.into_iter())?;
 
         debug!("Read {} records", tagged_records.len());
 
@@ -548,9 +567,9 @@ impl<R: Recordable> DB<R> {
 
     /// Read records from segment files based on log keys.
     /// The log keys are accompanied by an integer tag that can be used to identify and group them later.
-    fn read_tagged_log_keys(
-        &mut self,
-        log_keys: impl Iterator<Item = (usize, LogKey)>,
+    fn read_tagged_log_keys<'a>(
+        &self,
+        log_keys: impl Iterator<Item = (usize, &'a LogKey)>,
     ) -> Result<Vec<(usize, Record)>, DBError> {
         let mut records = vec![];
         let mut log_keys_map = BTreeMap::new();

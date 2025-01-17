@@ -99,9 +99,9 @@ impl PartialOrd for LogKeySet {
 impl LogKeySet {
     /// Create a new LogKeySet with an initial LogKey.
     /// The initial LogKey is required since LogKeySet must be non-empty.
-    pub fn new_with_initial(key: &LogKey) -> Self {
+    pub fn new_with_initial(key: LogKey) -> Self {
         let mut set = HashSet::new();
-        set.insert(key.clone());
+        set.insert(key);
         LogKeySet { set }
     }
 

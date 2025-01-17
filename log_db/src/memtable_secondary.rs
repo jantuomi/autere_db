@@ -19,14 +19,13 @@ impl SecondaryMemtable {
         }
     }
 
-    pub fn set(&mut self, key: &IndexableValue, value: &LogKey) {
-        match self.records.get_mut(key) {
+    pub fn set(&mut self, key: IndexableValue, value: LogKey) {
+        match self.records.get_mut(&key) {
             Some(set) => {
-                set.insert(value.clone());
+                set.insert(value);
             }
             None => {
-                self.records
-                    .insert(key.clone(), LogKeySet::new_with_initial(&value));
+                self.records.insert(key, LogKeySet::new_with_initial(value));
             }
         };
     }
@@ -36,11 +35,6 @@ impl SecondaryMemtable {
             Some(set) => set.log_keys(),
             None => &EMPTY_SET,
         }
-    }
-
-    // Remove all log keys associated with the given key
-    pub fn remove_all(&mut self, key: &IndexableValue) -> Option<LogKeySet> {
-        self.records.remove(key)
     }
 
     // Remove a single log key associated with the given key. Returns `true`
@@ -62,24 +56,10 @@ impl SecondaryMemtable {
         }
     }
 
-    // Remove all log keys associated with the given log key
-    // Note: This is a linear time operation, prefer using the `remove` method
-    // if you know the secondary key associated with the log key.
-    pub fn scan_remove(&mut self, log_key: &LogKey) -> u64 {
-        let mut removed = 0;
-        self.records.iter_mut().for_each(|(_, set)| {
-            if let Ok(_) = set.remove(&log_key) {
-                removed += 1;
-            }
-        });
-
-        removed
-    }
-
-    pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<LogKey> {
+    pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<&LogKey> {
         let mut keys = Vec::new();
         for (_, set) in self.records.range(range) {
-            keys.extend(set.log_keys().iter().cloned());
+            keys.extend(set.log_keys().iter());
         }
         keys
     }
