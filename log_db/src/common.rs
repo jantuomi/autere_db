@@ -7,7 +7,6 @@ use std::fs::{self, metadata, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
-use std::thread;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -20,12 +19,14 @@ use std::os::unix::fs::MetadataExt;
 use std::os::windows::fs::MetadataExt;
 
 pub const ACTIVE_SYMLINK_FILENAME: &str = "active";
+pub const LOCK_FILENAME: &str = "lock";
+pub const EXCL_LOCK_REQ_FILENAME: &str = "excl_lock_req";
+pub const INITIALIZED_FILENAME: &str = "initialized";
+
 pub const METADATA_FILE_HEADER_SIZE: usize = 24;
 pub const METADATA_ROW_LENGTH: usize = 16;
-pub const EXCL_LOCK_REQUEST_FILENAME: &str = "excl_lock_req";
-pub const INIT_LOCK_FILENAME: &str = "init_lock";
 pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
-pub const TEST_RESOURCES_DIR: &str = "tests/resources";
+pub const LOCK_WAIT_MAX_MS: u64 = 1000;
 
 // Serialized value tags
 pub const B_NULL: u8 = 0x0;
@@ -470,7 +471,10 @@ pub fn create_segment_metadata_file(
     let metadata_filename = format!("metadata.{}", new_num);
     let metadata_path = data_dir_path.join(metadata_filename);
 
-    let mut metadata_file = APPEND_MODE.clone().create(true).open(&metadata_path)?;
+    let mut metadata_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&metadata_path)?;
 
     let metadata_header = MetadataHeader {
         version: 1,
@@ -529,7 +533,6 @@ pub fn create_segment_data_file(data_dir_path: &Path) -> DBResult<(Uuid, PathBuf
     let new_segment_path = data_dir_path.join(uuid.to_string());
     fs::OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(&new_segment_path)?;
 
@@ -648,84 +651,6 @@ pub fn ensure_active_metadata_is_valid(
             return Ok(false);
         }
     }
-}
-
-const LOCK_WAIT_MAX_MS: u64 = 1000;
-
-pub fn is_exclusive_lock_requested(data_dir: &Path) -> DBResult<bool> {
-    let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
-    let lock_request_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true) // When requesting a lock, we need to have either read or write permissions
-        .open(&lock_request_path)?;
-
-    // Attempt to acquire a shared lock on the lock request file
-    // If the file is already locked, return false
-    match lock_request_file.try_lock_shared() {
-        Err(e) => {
-            if e.kind() == lock_contended_error().kind() {
-                return Ok(true);
-            }
-            return Err(DBError::IOError(e));
-        }
-
-        Ok(_) => {
-            // Check that the exclusive lock request file is still the same as the one we opened
-            if !is_file_same_as_path(&lock_request_file, &lock_request_path)? {
-                // The lock request file has been removed
-                return Err(DBError::ConsistencyError(
-                    "Lock request file was removed while checking for exclusive lock".to_owned(),
-                ));
-            }
-
-            lock_request_file.unlock()?;
-            return Ok(false);
-        }
-    }
-}
-
-pub fn request_shared_lock(data_dir: &Path, file: &mut fs::File) -> DBResult<()> {
-    let mut timeout = 5;
-    loop {
-        if is_exclusive_lock_requested(data_dir)? {
-            debug!(
-                "Exclusive lock requested, waiting for {}ms before requesting a shared lock again",
-                timeout
-            );
-            thread::sleep(std::time::Duration::from_millis(timeout));
-            timeout *= 2;
-
-            if timeout > LOCK_WAIT_MAX_MS {
-                return Err(DBError::LockRequestError(
-                    "Acquisition of shared lock timed out after {LOCK_WAIT_MAX_MS}".to_owned(),
-                ));
-            }
-        } else {
-            file.lock_shared()?;
-            return Ok(());
-        }
-    }
-}
-
-pub fn request_exclusive_lock(data_dir: &Path, file: &mut fs::File) -> DBResult<()> {
-    // Create a lock on the exclusive lock request file to signal to readers that they should wait
-    let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
-    let lock_request_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true) // When requesting a lock, we need to have either read or write permissions
-        .open(&lock_request_path)?;
-
-    // Attempt to acquire an exclusive lock on the lock request file
-    // This will block until the lock is acquired
-    lock_request_file.lock_exclusive()?;
-
-    // Acquire an exclusive lock on the segment files
-    file.lock_exclusive()?;
-
-    // Unlock the request file
-    lock_request_file.unlock()?;
-
-    Ok(())
 }
 
 pub struct OwnedBounds<T> {

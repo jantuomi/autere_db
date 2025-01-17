@@ -2,12 +2,14 @@ use super::*;
 
 pub struct Engine<R: Recordable> {
     pub config: Config<R>,
+    pub lock_manager: LockManager,
 
-    data_dir: PathBuf,
-    active_metadata_file: fs::File,
-    active_data_file: fs::File,
+    data_dir_path: PathBuf,
     primary_key_index: usize,
     refresh_next_logkey: LogKey,
+
+    active_metadata_file: fs::File,
+    active_data_file: fs::File,
 
     // TODO: these could be made private. Currently they are public for testing in lib.rs.
     pub primary_memtable: PrimaryMemtable,
@@ -17,14 +19,12 @@ pub struct Engine<R: Recordable> {
 impl<R: Recordable> Engine<R> {
     pub fn initialize(config: Config<R>) -> DBResult<Engine<R>> {
         info!("Initializing DB...");
-        // If data_dir does not exist or is empty, create it and any necessary files
-        // After creation, the directory should always be in a complete state
-        // without missing files.
-        // A tempdir-move strategy is used to achieve one-phase commit.
+        // If data_dir does not exist or is empty, create it and any necessary files.
+        // After creation, the directory should always be in a complete state without missing files.
 
         // Ensure the data directory exists
-        let data_dir = Path::new(&config.data_dir).to_path_buf();
-        match fs::create_dir(&data_dir) {
+        let data_dir_path = Path::new(&config.data_dir).to_path_buf();
+        match fs::create_dir(&data_dir_path) {
             Ok(_) => {}
             Err(e) => {
                 if e.kind() != io::ErrorKind::AlreadyExists {
@@ -33,38 +33,43 @@ impl<R: Recordable> Engine<R> {
             }
         }
 
-        // Create an initialize lock file to prevent multiple concurrent initializations
-        let init_lock_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&data_dir.join(INIT_LOCK_FILENAME))?;
-
-        init_lock_file.lock_exclusive()?;
+        // Create the lock file first to prevent multiple concurrent initializations
+        let mut lock_manager = LockManager::new(data_dir_path.clone())?;
+        lock_manager.lock_exclusive()?;
 
         // We have acquired the lock, check if the data directory is in a complete state
         // If not, initialize it, otherwise skip.
-        if !fs::exists(data_dir.join(ACTIVE_SYMLINK_FILENAME))? {
-            let (segment_uuid, _) = create_segment_data_file(&data_dir)?;
-            let (segment_num, _) = create_segment_metadata_file(&data_dir, &segment_uuid)?;
-            set_active_segment(&data_dir, segment_num)?;
+        if !fs::exists(data_dir_path.join(INITIALIZED_FILENAME))? {
+            // Delete all files except the lock files to ensure a clean state
+            for entry in fs::read_dir(&data_dir_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file()
+                    && path.file_name().unwrap() != LOCK_FILENAME
+                    && path.file_name().unwrap() != EXCL_LOCK_REQ_FILENAME
+                {
+                    fs::remove_file(&path)?;
+                }
+            }
 
-            // Create the exclusive lock request file
-            fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(data_dir.join(EXCL_LOCK_REQUEST_FILENAME))?;
+            // Create the initial segment files
+            let (segment_uuid, _) = create_segment_data_file(&data_dir_path)?;
+            let (segment_num, _) = create_segment_metadata_file(&data_dir_path, &segment_uuid)?;
+            set_active_segment(&data_dir_path, segment_num)?;
+
+            // Create the initialized file to indicate that the directory is in a complete state
+            fs::File::create(data_dir_path.join(INITIALIZED_FILENAME))?;
         }
 
-        init_lock_file.unlock()?;
+        lock_manager.unlock()?;
 
         // Calculate the index of the primary value in a record
         let primary_key_index = config
             .fields
             .iter()
             .position(|(field, _)| field == &config.primary_key)
-            .ok_or(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Primary key not found in schema after initialize",
+            .ok_or(DBError::ValidationError(
+                "Primary key not found in schema after initialize".to_owned(),
             ))?;
 
         // Join primary key and secondary keys vec into a single vec
@@ -105,12 +110,13 @@ impl<R: Recordable> Engine<R> {
 
         let mut engine = Engine::<R> {
             config,
-            data_dir,
-            active_metadata_file,
-            active_data_file,
+            lock_manager,
+            data_dir_path,
             primary_key_index,
             primary_memtable,
             secondary_memtables,
+            active_metadata_file,
+            active_data_file,
             refresh_next_logkey: LogKey::new(1, 0),
         };
 
@@ -123,16 +129,16 @@ impl<R: Recordable> Engine<R> {
     }
 
     pub fn refresh_indexes(&mut self) -> DBResult<()> {
-        let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
+        let active_symlink_path = self.data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
         let active_target = fs::read_link(active_symlink_path)?;
-        let active_metadata_path = self.data_dir.join(active_target);
+        let active_metadata_path = self.data_dir_path.join(active_target);
 
         let to_segnum = parse_segment_number(&active_metadata_path)?;
         let from_segnum = self.refresh_next_logkey.segment_num();
         let mut from_index = self.refresh_next_logkey.index();
 
         for segnum in from_segnum..=to_segnum {
-            let metadata_path = self.data_dir.join(metadata_filename(segnum));
+            let metadata_path = self.data_dir_path.join(metadata_filename(segnum));
             let mut metadata_file = READ_MODE.open(&metadata_path)?;
 
             let metadata_len = metadata_file.seek(SeekFrom::End(0))?;
@@ -144,12 +150,10 @@ impl<R: Recordable> Engine<R> {
                 )));
             }
 
-            request_shared_lock(&self.data_dir, &mut metadata_file)?;
-
             let metadata_header = read_metadata_header(&mut metadata_file)?;
             validate_metadata_header(&metadata_header)?;
 
-            let data_path = self.data_dir.join(metadata_header.uuid.to_string());
+            let data_path = self.data_dir_path.join(metadata_header.uuid.to_string());
             let data_file = READ_MODE.open(data_path)?;
 
             for ForwardLogReaderItem { record, index } in
@@ -219,26 +223,23 @@ impl<R: Recordable> Engine<R> {
     }
 
     pub fn batch_upsert_records(&mut self, records: impl Iterator<Item = Record>) -> DBResult<()> {
-        debug!("Opening file in append mode and acquiring exclusive lock...");
-
-        // Acquire an exclusive lock for writing
-        request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
+        debug!("Opening file in append mode...");
 
         if !self.ensure_metadata_file_is_active()?
-            || !ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?
+            || !ensure_active_metadata_is_valid(
+                &self.data_dir_path,
+                &mut self.active_metadata_file,
+            )?
         {
             // The log file has been rotated, so we must try again
-            self.active_metadata_file.unlock()?;
             return self.batch_upsert_records(records);
         }
 
-        self.active_data_file.lock_exclusive()?;
-
-        let active_symlink_path = self.data_dir.join(ACTIVE_SYMLINK_FILENAME);
+        let active_symlink_path = self.data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
         let active_target = fs::read_link(active_symlink_path)?;
         let segment_num = parse_segment_number(&active_target)?;
 
-        debug!("Exclusive lock acquired, appending to log file");
+        debug!("Appending to log file");
 
         let mut serialized_data: Vec<u8> = vec![];
         let mut serialized_metadata: Vec<u8> = vec![];
@@ -284,11 +285,7 @@ impl<R: Recordable> Engine<R> {
             self.active_metadata_file.sync_all()?;
         }
 
-        debug!("Records appended to log file, releasing locks");
-
-        // Manually release the locks because the file handles are left open
-        self.active_data_file.unlock()?;
-        self.active_metadata_file.unlock()?;
+        debug!("Records appended to log file");
 
         for (log_key, record) in pending_memtable_insertions {
             self.insert_record_to_memtables(log_key, record);
@@ -403,17 +400,13 @@ impl<R: Recordable> Engine<R> {
         for (segment_num, mut segment_indexes) in log_keys_map {
             segment_indexes.sort_unstable();
 
-            let metadata_path = &self.data_dir.join(metadata_filename(segment_num));
+            let metadata_path = &self.data_dir_path.join(metadata_filename(segment_num));
             let mut metadata_file = READ_MODE.open(&metadata_path)?;
-
-            request_shared_lock(&self.data_dir, &mut metadata_file)?;
 
             let metadata_header = read_metadata_header(&mut metadata_file)?;
 
-            let data_path = &self.data_dir.join(metadata_header.uuid.to_string());
+            let data_path = &self.data_dir_path.join(metadata_header.uuid.to_string());
             let mut data_file = READ_MODE.open(&data_path)?;
-
-            data_file.lock_shared()?;
 
             let header_size = METADATA_FILE_HEADER_SIZE as i64;
             let row_length = METADATA_ROW_LENGTH as i64;
@@ -439,9 +432,6 @@ impl<R: Recordable> Engine<R> {
 
                 current_metadata_offset = new_metadata_offset + row_length;
             }
-
-            metadata_file.unlock()?;
-            data_file.unlock()?;
         }
 
         Ok(records)
@@ -510,21 +500,19 @@ impl<R: Recordable> Engine<R> {
     /// If the segment has been rotated, the handle will be closed and reopened.
     /// Returns `false` if the file has been rotated and the handle has been reopened, `true` otherwise.
     fn ensure_metadata_file_is_active(&mut self) -> DBResult<bool> {
-        let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
-        let active_metadata_path = &self.data_dir.join(active_target);
+        let active_target = fs::read_link(&self.data_dir_path.join(ACTIVE_SYMLINK_FILENAME))?;
+        let active_metadata_path = &self.data_dir_path.join(active_target);
 
         let correct = is_file_same_as_path(&self.active_metadata_file, &active_metadata_path)?;
         if !correct {
             debug!("Metadata file has been rotated. Reopening...");
             let mut metadata_file = APPEND_MODE.open(&active_metadata_path)?;
 
-            request_shared_lock(&self.data_dir, &mut metadata_file)?;
-
             let metadata_header = read_metadata_header(&mut self.active_metadata_file)?;
 
             validate_metadata_header(&metadata_header)?;
 
-            let data_file_path = &self.data_dir.join(metadata_header.uuid.to_string());
+            let data_file_path = &self.data_dir_path.join(metadata_header.uuid.to_string());
 
             self.active_metadata_file = metadata_file;
             self.active_data_file = APPEND_MODE.open(&data_file_path)?;
@@ -536,18 +524,14 @@ impl<R: Recordable> Engine<R> {
     }
 
     pub fn delete_by_field(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<Record>> {
-        let value_batch = std::iter::once(value);
         let recs: Vec<Record> = self
-            .batch_find_by_records(field, value_batch)?
+            .batch_find_by_records(field, std::iter::once(value))?
             .into_iter()
             .map(|(_, mut rec)| {
                 rec.tombstone = true;
                 rec
             })
             .collect();
-
-        request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
-        self.active_data_file.lock_exclusive()?;
 
         for record in &recs {
             let record_serialized = record.serialize();
@@ -584,25 +568,18 @@ impl<R: Recordable> Engine<R> {
             self.remove_record_from_memtables(&record);
         }
 
-        self.active_metadata_file.unlock()?;
-        self.active_data_file.unlock()?;
-
         debug!("Records deleted");
 
         Ok(recs)
     }
 
     pub fn do_maintenance_tasks(&mut self) -> DBResult<()> {
-        request_exclusive_lock(&self.data_dir, &mut self.active_metadata_file)?;
-
-        ensure_active_metadata_is_valid(&self.data_dir, &mut self.active_metadata_file)?;
+        ensure_active_metadata_is_valid(&self.data_dir_path, &mut self.active_metadata_file)?;
 
         let metadata_size = self.active_metadata_file.seek(SeekFrom::End(0))?;
         if metadata_size >= self.config.segment_size as u64 {
             self.rotate_and_compact()?;
         }
-
-        self.active_metadata_file.unlock()?;
 
         Ok(())
     }
@@ -610,10 +587,9 @@ impl<R: Recordable> Engine<R> {
     fn rotate_and_compact(&mut self) -> DBResult<()> {
         debug!("Active log size exceeds threshold, starting rotation and compaction...");
 
-        self.active_data_file.lock_shared()?;
         let original_data_len = self.active_data_file.seek(SeekFrom::End(0))?;
 
-        let active_target = fs::read_link(&self.data_dir.join(ACTIVE_SYMLINK_FILENAME))?;
+        let active_target = fs::read_link(&self.data_dir_path.join(ACTIVE_SYMLINK_FILENAME))?;
         let active_num = parse_segment_number(&active_target)?;
 
         debug!("Reading segment data into a BTreeMap");
@@ -633,8 +609,6 @@ impl<R: Recordable> Engine<R> {
         })
         .collect();
 
-        self.active_data_file.unlock()?;
-
         for (pk, record) in forward_read_items.iter() {
             pk_to_item_map.insert(pk, record);
         }
@@ -647,7 +621,7 @@ impl<R: Recordable> Engine<R> {
 
         // Create a new log data file and write it
         debug!("Opening new data file and writing compacted data");
-        let (new_data_uuid, new_data_path) = create_segment_data_file(&self.data_dir)?;
+        let (new_data_uuid, new_data_path) = create_segment_data_file(&self.data_dir_path)?;
         let mut new_data_file = APPEND_MODE.open(&new_data_path)?;
 
         let mut pk_to_data_map = BTreeMap::new();
@@ -701,15 +675,15 @@ impl<R: Recordable> Engine<R> {
         temp_metadata_file.sync_all()?;
 
         debug!("Moving temporary files to their final locations");
-        let new_data_path = &self.data_dir.join(new_data_uuid.to_string());
-        let active_metadata_path = &self.data_dir.join(metadata_filename(active_num)); // overwrite active
+        let new_data_path = &self.data_dir_path.join(new_data_uuid.to_string());
+        let active_metadata_path = &self.data_dir_path.join(metadata_filename(active_num)); // overwrite active
 
         fs::rename(&temp_metadata_path, &active_metadata_path)?;
 
         debug!("Compaction complete, creating new segment");
 
         let new_segment_num = active_num + 1;
-        let new_metadata_path = self.data_dir.join(metadata_filename(new_segment_num));
+        let new_metadata_path = self.data_dir_path.join(metadata_filename(new_segment_num));
         let mut new_metadata_file = APPEND_MODE.clone().create(true).open(&new_metadata_path)?;
 
         let new_metadata_header = MetadataHeader {
@@ -719,15 +693,11 @@ impl<R: Recordable> Engine<R> {
 
         new_metadata_file.write_all(&new_metadata_header.serialize())?;
 
-        set_active_segment(&self.data_dir, new_segment_num)?;
-
-        // Old active metadata file should lose lock by RAII, or by
-        // the manual unlock call in the do_maintenance_tasks method.
+        set_active_segment(&self.data_dir_path, new_segment_num)?;
 
         self.active_metadata_file = APPEND_MODE.open(&new_metadata_path)?;
         self.active_data_file = APPEND_MODE.open(&new_data_path)?;
 
-        // The new active log file is not locked by this client so it cannot be touched.
         debug!(
             "Active log file {} rotated and compacted, new segment: {}",
             active_num, new_segment_num
@@ -743,5 +713,22 @@ impl<R: Recordable> Engine<R> {
             .iter()
             .find(|(f, _)| f == field)
             .map(|(_, t)| t)
+    }
+
+    pub fn with_exclusive_lock<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> DBResult<T>,
+    ) -> DBResult<T> {
+        self.lock_manager.lock_exclusive()?;
+        let result = f(self)?;
+        self.lock_manager.unlock()?;
+        Ok(result)
+    }
+
+    pub fn with_shared_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> DBResult<T>) -> DBResult<T> {
+        self.lock_manager.lock_shared()?;
+        let result = f(self)?;
+        self.lock_manager.unlock()?;
+        Ok(result)
     }
 }

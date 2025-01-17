@@ -1,7 +1,4 @@
-use super::common::*;
-use super::record::*;
-use std::fs::{self};
-use std::io::{self, Read, Seek};
+use super::*;
 
 pub struct ForwardLogReader {
     metadata_reader: io::BufReader<fs::File>,
@@ -96,7 +93,8 @@ impl Iterator for ForwardLogReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+
+    const TEST_RESOURCES_DIR: &str = "tests/resources";
 
     #[test]
     fn test_forward_log_reader_fixture_db1() {

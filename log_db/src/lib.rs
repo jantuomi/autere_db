@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use fs2::FileExt;
+use fs2::{lock_contended_error, FileExt};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -10,11 +10,13 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::ops::*;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 #[macro_use]
 mod common;
 mod config;
 mod engine;
+mod lock;
 mod log_reader_forward;
 mod memtable_primary;
 mod memtable_secondary;
@@ -27,6 +29,7 @@ pub use record::Recordable;
 use common::*;
 use config::*;
 use engine::*;
+use lock::*;
 use log_reader_forward::*;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
@@ -56,7 +59,11 @@ impl<R: Recordable> DB<R> {
         record.validate(&self.engine.config.fields)?;
         debug!("Record is valid");
 
-        self.engine.batch_upsert_records(std::iter::once(record))
+        self.engine.with_exclusive_lock(move |engine| {
+            engine.batch_upsert_records(std::iter::once(record))
+        })?;
+
+        Ok(())
     }
 
     /// Insert a batch of records into the database. If the primary key value for a record already exists,
@@ -73,20 +80,26 @@ impl<R: Recordable> DB<R> {
         }
         debug!("Records are valid");
 
-        self.engine.batch_upsert_records(records.into_iter())
+        self.engine
+            .with_exclusive_lock(move |engine| engine.batch_upsert_records(records.into_iter()))?;
+
+        Ok(())
     }
 
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
     pub fn get(&mut self, value: &Value) -> DBResult<Option<R>> {
-        let value_batch = std::iter::once(value);
-        let records = self
-            .engine
-            // TODO: This clone is only here to appease the borrow checker
-            .batch_find_by_records(&self.engine.config.primary_key.clone(), value_batch)?;
-        assert!(records.len() <= 1);
+        let recs = self.engine.with_shared_lock(|engine| {
+            engine.batch_find_by_records(
+                // TODO: This clone is only here to appease the borrow checker
+                &engine.config.primary_key.clone(),
+                std::iter::once(value),
+            )
+        })?;
 
-        Ok(records
+        assert!(recs.len() <= 1);
+
+        Ok(recs
             .into_iter()
             .next()
             .map(|(_, rec)| R::from_record(rec.values)))
@@ -95,10 +108,11 @@ impl<R: Recordable> DB<R> {
     /// Get a collection of records based on a field value.
     /// Indexes will be used if they are applicable.
     pub fn find_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
-        let value_batch = std::iter::once(value);
-        Ok(self
-            .engine
-            .batch_find_by_records(field, value_batch)?
+        let recs = self.engine.with_shared_lock(|engine| {
+            engine.batch_find_by_records(field, std::iter::once(value))
+        })?;
+
+        Ok(recs
             .into_iter()
             .map(|(_, rec)| R::from_record(rec.values))
             .collect())
@@ -113,9 +127,11 @@ impl<R: Recordable> DB<R> {
         field: &R::Field,
         values: &[Value],
     ) -> DBResult<Vec<(usize, R)>> {
-        Ok(self
+        let recs = self
             .engine
-            .batch_find_by_records(field, values.iter())?
+            .with_shared_lock(|engine| engine.batch_find_by_records(field, values.iter()))?;
+
+        Ok(recs
             .into_iter()
             .map(|(tag, rec)| (tag, R::from_record(rec.values)))
             .collect())
@@ -126,9 +142,11 @@ impl<R: Recordable> DB<R> {
         field: &R::Field,
         range: B,
     ) -> DBResult<Vec<R>> {
-        Ok(self
+        let recs = self
             .engine
-            .range_by_records(field, range)?
+            .with_shared_lock(|engine| engine.range_by_records(field, range))?;
+
+        Ok(recs
             .into_iter()
             .map(|rec| R::from_record(rec.values))
             .collect())
@@ -141,7 +159,9 @@ impl<R: Recordable> DB<R> {
     /// Deletion is done by marking the record as a tombstone. The record will still be present in the log file,
     /// but will be ignored by reads. Upon compaction, tombstoned records will be removed.
     pub fn delete_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
-        let recs = self.engine.delete_by_field(field, value)?;
+        let recs = self
+            .engine
+            .with_exclusive_lock(|engine| engine.delete_by_field(field, value))?;
 
         Ok(recs
             .into_iter()
@@ -151,10 +171,12 @@ impl<R: Recordable> DB<R> {
 
     /// Delete record by primary key.
     pub fn delete(&mut self, pk: &Value) -> DBResult<Option<R>> {
-        let recs = self
-            .engine
-            // TODO: This clone is only here to appease the borrow checker
-            .delete_by_field(&self.engine.config.primary_key.clone(), pk)?;
+        let recs = self.engine.with_exclusive_lock(|engine| {
+            engine
+                // TODO: This clone is only here to appease the borrow checker
+                .delete_by_field(&engine.config.primary_key.clone(), pk)
+        })?;
+
         assert!(recs.len() <= 1);
 
         Ok(recs
@@ -171,13 +193,15 @@ impl<R: Recordable> DB<R> {
     /// You may call this function in a separate thread or process to avoid blocking the main thread.
     /// However, the database will be exclusively locked, so all writes and reads will be blocked during the tasks.
     pub fn do_maintenance_tasks(&mut self) -> DBResult<()> {
-        self.engine.do_maintenance_tasks()
+        self.engine
+            .with_exclusive_lock(|engine| engine.do_maintenance_tasks())
     }
 
     /// Refresh the in-memory indexes from the log files.
     /// This needs to only be called if the read consistency is set to `ReadConsistency::Eventual`.
     pub fn refresh_indexes(&mut self) -> DBResult<()> {
-        self.engine.refresh_indexes()
+        self.engine
+            .with_exclusive_lock(|engine| engine.refresh_indexes())
     }
 }
 
