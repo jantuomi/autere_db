@@ -3,7 +3,6 @@ use once_cell::sync::Lazy;
 use rust_decimal::Decimal;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::fmt::Display;
 use std::fs::{self, metadata, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Bound, RangeBounds};
@@ -198,33 +197,6 @@ impl MetadataHeader {
         let uuid = Uuid::from_slice(&bytes[8..24]).expect("Failed to deserialize Uuid");
 
         MetadataHeader { version, uuid }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum ReadConsistency {
-    /// Reads by client A are guaranteed to see writes by themselves and any writes by other clients B
-    /// that were done before last index refresh. You must call `refresh_indexes()` manually to refresh indexes.
-    Eventual,
-    /// Reads by client A are guaranteed to see all writes. This is slower: all reads must first
-    /// refresh indexes.
-    Strong,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum WriteDurability {
-    /// Changes are written to the OS write buffer but not immediately synced to disk.
-    /// This is generally recommended. Most OSes will sync the write buffer to disk within a few seconds.
-    Flush,
-    /// Changes are written to the OS write buffer and synced to disk immediately.
-    /// Offers the best durability guarantees but is a lot slower.
-    FlushSync,
-}
-
-impl Display for WriteDurability {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "{:?}", self)?;
-        Ok(())
     }
 }
 
@@ -680,8 +652,8 @@ pub fn ensure_active_metadata_is_valid(
 
 const LOCK_WAIT_MAX_MS: u64 = 1000;
 
-    let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
 pub fn is_exclusive_lock_requested(data_dir: &Path) -> DBResult<bool> {
+    let lock_request_path = data_dir.join(EXCL_LOCK_REQUEST_FILENAME);
     let lock_request_file = fs::OpenOptions::new()
         .create(true)
         .write(true) // When requesting a lock, we need to have either read or write permissions
