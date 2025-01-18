@@ -25,7 +25,6 @@ pub const INITIALIZED_FILENAME: &str = "initialized";
 
 pub const METADATA_FILE_HEADER_SIZE: usize = 24;
 pub const METADATA_ROW_LENGTH: usize = 16;
-pub const DEFAULT_READ_BUF_SIZE: usize = 1024 * 1024; // 1 MB
 pub const LOCK_WAIT_MAX_MS: u64 = 1000;
 
 // Serialized value tags

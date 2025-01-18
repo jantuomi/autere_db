@@ -61,8 +61,6 @@ impl<R: Recordable> Engine<R> {
             fs::File::create(data_dir_path.join(INITIALIZED_FILENAME))?;
         }
 
-        lock_manager.unlock()?;
-
         // Calculate the index of the primary value in a record
         let primary_key_index = config
             .fields
@@ -125,6 +123,7 @@ impl<R: Recordable> Engine<R> {
 
         info!("Database ready.");
 
+        engine.lock_manager.unlock()?;
         Ok(engine)
     }
 
@@ -506,7 +505,7 @@ impl<R: Recordable> Engine<R> {
         let correct = is_file_same_as_path(&self.active_metadata_file, &active_metadata_path)?;
         if !correct {
             debug!("Metadata file has been rotated. Reopening...");
-            let mut metadata_file = APPEND_MODE.open(&active_metadata_path)?;
+            let metadata_file = APPEND_MODE.open(&active_metadata_path)?;
 
             let metadata_header = read_metadata_header(&mut self.active_metadata_file)?;
 
@@ -715,20 +714,22 @@ impl<R: Recordable> Engine<R> {
             .map(|(_, t)| t)
     }
 
+    #[inline]
     pub fn with_exclusive_lock<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> DBResult<T>,
     ) -> DBResult<T> {
         self.lock_manager.lock_exclusive()?;
-        let result = f(self)?;
+        let result = f(self);
         self.lock_manager.unlock()?;
-        Ok(result)
+        result
     }
 
+    #[inline]
     pub fn with_shared_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> DBResult<T>) -> DBResult<T> {
         self.lock_manager.lock_shared()?;
-        let result = f(self)?;
+        let result = f(self);
         self.lock_manager.unlock()?;
-        Ok(result)
+        result
     }
 }

@@ -12,7 +12,6 @@ enum LockState {
     NotLocked,
     Shared,
     Exclusive,
-    ManualExclusive,
 }
 
 impl LockManager {
@@ -47,7 +46,13 @@ impl LockManager {
 
     pub fn lock_shared(&mut self) -> DBResult<()> {
         if self.state == LockState::Shared {
-            return Ok(());
+            return Err(DBError::LockRequestError(
+                "Already holding a shared lock".to_owned(),
+            ));
+        } else if self.state == LockState::Exclusive {
+            return Err(DBError::LockRequestError(
+                "Cannot acquire shared lock while holding an exclusive lock".to_owned(),
+            ));
         }
 
         let mut timeout = 5;
@@ -74,8 +79,14 @@ impl LockManager {
     }
 
     pub fn lock_exclusive(&mut self) -> DBResult<()> {
-        if self.state == LockState::Exclusive || self.state == LockState::ManualExclusive {
-            return Ok(());
+        if self.state == LockState::Exclusive {
+            return Err(DBError::LockRequestError(
+                "Already holding an exclusive lock".to_owned(),
+            ));
+        } else if self.state == LockState::Shared {
+            return Err(DBError::LockRequestError(
+                "Cannot acquire exclusive lock while holding a shared lock".to_owned(),
+            ));
         }
 
         // Create a lock on the exclusive lock request file to signal to readers that they should wait
@@ -93,6 +104,12 @@ impl LockManager {
     }
 
     pub fn unlock(&mut self) -> DBResult<()> {
+        if self.state == LockState::NotLocked {
+            return Err(DBError::LockRequestError(
+                "Not holding any locks".to_owned(),
+            ));
+        }
+
         self.lock_file.unlock()?;
         self.state = LockState::NotLocked;
         Ok(())
