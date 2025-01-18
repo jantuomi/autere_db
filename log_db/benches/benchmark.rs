@@ -104,17 +104,17 @@ pub fn get_existing_compacted(c: &mut Criterion) {
         .expect("Failed to initialize DB");
 
     let mut insts = Vec::new();
+    let mut inst_index = 0;
     for size in [100_000, 1_000_000, 10_000_000] {
         println!("Prefilling DB to {} entries", size);
         prefill_db(&mut db, &mut insts, size, true).expect("Failed to prefill DB");
-        let mut inst_it = insts.iter();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
-                let result = db
-                    .get(black_box(&Value::Int(inst_it.next().unwrap().id)))
-                    .unwrap();
-                assert!(result.is_some())
+                let id = insts[inst_index].id;
+                let result = db.get(black_box(&Value::Int(id))).unwrap();
+                assert!(result.is_some());
+                inst_index = (inst_index + 1) % insts.len();
             });
         });
     }
