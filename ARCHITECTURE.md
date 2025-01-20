@@ -364,3 +364,15 @@ requirements of the upcoming transaction API, a simpler locking mechanism is nee
 The new locking mechanism will be based on a single lock file that is locked either exclusively or in shared mode. The lock file is used for all concurrency handling, even initialization of the DB. As such, it should be the first file to be added to the database directory. This also reduces the number of "do I have the most up to date file locked" checks.
 
 Using a single lock file relies on more cooperation and well-behavedness of the processes accessing the database, since the lock system won't protect from accesses without the lock. This is a trade-off for simplicity and performance.
+
+## 2025-01-17 Decimal type instead of Float
+
+Previous designs of the database specified a `Float` type for storing floating point numbers. However, supporting secondary indexes for floating point numbers is difficult due to the nature of floating point arithmetic. Instead, the database will support a `Decimal` type, which is a fixed-point decimal type. The implementation is built on the `rust_decimal` crate, which provides an easy-to-serialize 96-bit decimal type. A precise decimal type can implement the Eq/PartialEq traits correctly, which is necessary for indexing.
+
+## 2025-01-20 Filesystem optimization
+
+Currently, the database opens and closes files often during reads and writes. To check the currently active file to write to, the DB must open the `active` symlink and read the target. To read data from multiple segments, each segment file is opened for reading and closed afterwards.
+
+To optimize this, the database will keep the file handles open for the duration of the process. The file descriptors are stored in a seg_num -> fs::File map, which is updated periodically. The `active` symlink is replaced by a file of the same name that contains the active segment number as a big-endian 16-bit integer. This file is opened once and read every time the active segment number is needed, i.e. at the beginning of each read and write. Reading and writing to the file is faster than querying the filesystem metadata and parsing the symlink target.
+
+When the active segment changes, the process should reopen the files between the previous stored segment number and the new active segment number, since they have been compacted.
