@@ -89,8 +89,7 @@ impl<R: Recordable> DB<R> {
             .map(|(_, rec)| R::from_record(rec.values)))
     }
 
-    /// Get a collection of records based on a field value.
-    /// Indexes will be used if they are applicable.
+    /// Get a collection of records based on an indexed field value.
     pub fn find_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
         let recs = self.engine.with_shared_lock(|engine| {
             engine.batch_find_by_records(field, std::iter::once(value))
@@ -102,8 +101,7 @@ impl<R: Recordable> DB<R> {
             .collect())
     }
 
-    /// Get a collection of records based on a sequence of field values.
-    /// Indexes will be used if they are applicable.
+    /// Get a collection of records based on a sequence of indexed field values.
     /// Returns a vector of pairs where the first value is an index into the given sequence of values,
     /// and the second value is the record.
     pub fn batch_find_by(
@@ -121,6 +119,9 @@ impl<R: Recordable> DB<R> {
             .collect())
     }
 
+    /// Get a collection of records based on a range of indexed field values.
+    /// This method can be used to run comparison-like queries, e.g. `field >= 10`
+    /// could be expressed as `db.range_by(Field::Id, 10..)`.
     pub fn range_by<B: RangeBounds<Value>>(
         &mut self,
         field: &R::Field,
@@ -188,6 +189,8 @@ impl<R: Recordable> DB<R> {
             .with_exclusive_lock(|engine| engine.refresh_indexes())
     }
 
+    /// Begin a transaction. This will acquire an exclusive lock on the database,
+    /// preventing other clients from using the database until the transaction is committed or rolled back.
     pub fn tx_begin(&mut self) -> DBResult<()> {
         if self.engine.tx_active {
             return Err(DBError::TransactionError(
@@ -200,6 +203,8 @@ impl<R: Recordable> DB<R> {
         Ok(())
     }
 
+    /// Commit the active transaction. A transaction must be active, otherwise
+    /// a `DBError::TransactionError` will be returned.
     pub fn tx_commit(&mut self) -> DBResult<()> {
         if !self.engine.tx_active {
             return Err(DBError::TransactionError(
@@ -214,6 +219,8 @@ impl<R: Recordable> DB<R> {
         Ok(())
     }
 
+    /// Rollback the active transaction. A transaction must be active, otherwise
+    /// a `DBError::TransactionError` will be returned.
     pub fn tx_rollback(&mut self) -> DBResult<()> {
         if !self.engine.tx_active {
             return Err(DBError::TransactionError(
