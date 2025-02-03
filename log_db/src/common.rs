@@ -41,6 +41,8 @@ pub enum DBError {
     ValidationError(String),
     #[error("consistency check failed: {0}")]
     ConsistencyError(String),
+    #[error("invalid transaction: {0}")]
+    TransactionError(String),
     #[error("unexpected IO error: {0}")]
     IOError(#[from] io::Error),
 }

@@ -65,29 +65,8 @@ impl<R: Recordable> DB<R> {
         record.validate(&self.engine.config.fields)?;
         debug!("Record is valid");
 
-        self.engine.with_exclusive_lock(move |engine| {
-            engine.batch_upsert_records(std::iter::once(record))
-        })?;
-
-        Ok(())
-    }
-
-    /// Insert a batch of records into the database. If the primary key value for a record already exists,
-    /// the existing record will be replaced by the supplied one. Records are inserted in the order they are given.
-    pub fn batch_upsert(&mut self, recordables: Vec<R>) -> DBResult<()> {
-        let records = recordables
-            .into_iter()
-            .map(|r| Record::from(&r.into_record()))
-            .collect::<Vec<Record>>();
-        debug!("Batch upserting {} records", records.len());
-
-        for record in &records {
-            record.validate(&self.engine.config.fields)?;
-        }
-        debug!("Records are valid");
-
         self.engine
-            .with_exclusive_lock(move |engine| engine.batch_upsert_records(records.into_iter()))?;
+            .with_exclusive_lock(move |engine| engine.upsert_record(record))?;
 
         Ok(())
     }
@@ -208,6 +187,45 @@ impl<R: Recordable> DB<R> {
     pub fn refresh_indexes(&mut self) -> DBResult<()> {
         self.engine
             .with_exclusive_lock(|engine| engine.refresh_indexes())
+    }
+
+    pub fn tx_begin(&mut self) -> DBResult<()> {
+        if self.engine.tx_active {
+            return Err(DBError::TransactionError(
+                "Transaction already active".to_string(),
+            ));
+        }
+
+        self.engine.lock_manager.lock_exclusive()?;
+        self.engine.tx_active = true;
+        Ok(())
+    }
+
+    pub fn tx_commit(&mut self) -> DBResult<()> {
+        if !self.engine.tx_active {
+            return Err(DBError::TransactionError(
+                "No active transaction to commit".to_string(),
+            ));
+        }
+
+        self.engine.commit_transaction()?;
+        self.engine.tx_log.clear();
+        self.engine.tx_active = false;
+        self.engine.lock_manager.unlock()?;
+        Ok(())
+    }
+
+    pub fn tx_rollback(&mut self) -> DBResult<()> {
+        if !self.engine.tx_active {
+            return Err(DBError::TransactionError(
+                "No active transaction to rollback".to_string(),
+            ));
+        }
+
+        self.engine.tx_log.clear();
+        self.engine.tx_active = false;
+        self.engine.lock_manager.unlock()?;
+        Ok(())
     }
 }
 

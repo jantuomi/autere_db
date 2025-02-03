@@ -144,3 +144,9 @@ mod tests {
         assert_eq!(record.values, deserialized.values);
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum TxEntry {
+    Upsert { record: Record },
+    Delete { record: Record },
+}

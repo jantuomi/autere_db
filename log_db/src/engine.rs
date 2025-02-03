@@ -8,6 +8,9 @@ pub struct Engine<R: Recordable> {
     primary_key_index: usize,
     refresh_next_logkey: LogKey,
 
+    pub tx_active: bool,
+    pub tx_log: Vec<TxEntry>,
+
     active_metadata_file: fs::File,
     active_data_file: fs::File,
 
@@ -116,6 +119,8 @@ impl<R: Recordable> Engine<R> {
             active_metadata_file,
             active_data_file,
             refresh_next_logkey: LogKey::new(1, 0),
+            tx_active: false,
+            tx_log: vec![],
         };
 
         info!("Rebuilding memtable indexes...");
@@ -221,7 +226,7 @@ impl<R: Recordable> Engine<R> {
         }
     }
 
-    pub fn batch_upsert_records(&mut self, records: impl Iterator<Item = Record>) -> DBResult<()> {
+    pub fn upsert_record(&mut self, record: Record) -> DBResult<()> {
         debug!("Opening file in append mode...");
 
         if !self.ensure_metadata_file_is_active()?
@@ -231,63 +236,14 @@ impl<R: Recordable> Engine<R> {
             )?
         {
             // The log file has been rotated, so we must try again
-            return self.batch_upsert_records(records);
+            return self.upsert_record(record);
         }
 
-        let active_symlink_path = self.data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
-        let active_target = fs::read_link(active_symlink_path)?;
-        let segment_num = parse_segment_number(&active_target)?;
+        self.tx_log.push(TxEntry::Upsert { record });
 
-        debug!("Appending to log file");
-
-        let mut serialized_data: Vec<u8> = vec![];
-        let mut serialized_metadata: Vec<u8> = vec![];
-        let mut pending_memtable_insertions: Vec<(LogKey, Record)> = vec![];
-        for record in records {
-            // Write the record to the log
-            let serialized = &record.serialize();
-            let record_offset = self.active_data_file.seek(SeekFrom::End(0))?;
-            let record_length = serialized.len() as u64;
-            assert!(record_length > 0);
-
-            serialized_data.extend(serialized);
-
-            let metadata_pos = self.active_metadata_file.seek(SeekFrom::End(0))?;
-            let metadata_index =
-                (metadata_pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
-
-            // Write the record metadata to the metadata file
-            let mut metadata_buf = vec![];
-            metadata_buf.extend(record_offset.to_be_bytes().into_iter());
-            metadata_buf.extend(record_length.to_be_bytes().into_iter());
-
-            assert_eq!(metadata_buf.len(), 16);
-
-            serialized_metadata.extend(metadata_buf);
-
-            let log_key = LogKey::new(segment_num, metadata_index);
-
-            pending_memtable_insertions.push((log_key, record));
-        }
-
-        self.active_data_file.write_all(&serialized_data)?;
-        self.active_metadata_file.write_all(&serialized_metadata)?;
-
-        // Flush and sync data and metadata to disk
-        if self.config.write_durability == WriteDurability::Flush {
-            self.active_data_file.flush()?;
-            self.active_metadata_file.flush()?;
-        } else if self.config.write_durability == WriteDurability::FlushSync {
-            self.active_data_file.flush()?;
-            self.active_data_file.sync_all()?;
-            self.active_metadata_file.flush()?;
-            self.active_metadata_file.sync_all()?;
-        }
-
-        debug!("Records appended to log file");
-
-        for (log_key, record) in pending_memtable_insertions {
-            self.insert_record_to_memtables(log_key, record);
+        if !self.tx_active {
+            self.commit_transaction()?;
+            self.tx_log.clear();
         }
 
         Ok(())
@@ -532,44 +488,90 @@ impl<R: Recordable> Engine<R> {
             })
             .collect();
 
+        // TODO: refactor the clone out of here
         for record in &recs {
-            let record_serialized = record.serialize();
+            self.tx_log.push(TxEntry::Delete {
+                record: record.clone(),
+            });
+        }
 
-            let offset = self.active_data_file.seek(SeekFrom::End(0))?;
-            let length = record_serialized.len() as u64;
-
-            self.active_data_file.write_all(&record_serialized)?;
-
-            // Flush and sync data to disk
-            if self.config.write_durability == WriteDurability::Flush {
-                self.active_data_file.flush()?;
-            }
-            if self.config.write_durability == WriteDurability::FlushSync {
-                self.active_data_file.flush()?;
-                self.active_data_file.sync_all()?;
-            }
-
-            let mut metadata_entry = vec![];
-            metadata_entry.extend(offset.to_be_bytes().into_iter());
-            metadata_entry.extend(length.to_be_bytes().into_iter());
-
-            self.active_metadata_file.write_all(&metadata_entry)?;
-
-            // Flush and sync metadata to disk
-            if self.config.write_durability == WriteDurability::Flush {
-                self.active_metadata_file.flush()?;
-            }
-            if self.config.write_durability == WriteDurability::FlushSync {
-                self.active_metadata_file.flush()?;
-                self.active_metadata_file.sync_all()?;
-            }
-
-            self.remove_record_from_memtables(&record);
+        if !self.tx_active {
+            self.commit_transaction()?;
+            self.tx_log.clear();
         }
 
         debug!("Records deleted");
 
         Ok(recs)
+    }
+
+    pub fn commit_transaction(&mut self) -> DBResult<()> {
+        let active_symlink_path = self.data_dir_path.join(ACTIVE_SYMLINK_FILENAME);
+        let active_target = fs::read_link(active_symlink_path)?;
+        let segment_num = parse_segment_number(&active_target)?;
+
+        let initial_data_offset = self.active_data_file.seek(SeekFrom::End(0))?;
+        let initial_metadata_offset = self.active_metadata_file.seek(SeekFrom::End(0))?;
+        let mut serialized_data: Vec<u8> = vec![];
+        let mut serialized_metadata: Vec<u8> = vec![];
+        let mut pending_memtable_ops: Vec<(LogKey, TxEntry)> = vec![];
+
+        debug!("Serializing tx_log to byte arrays");
+        for tx_entry in &self.tx_log {
+            let record = match tx_entry {
+                TxEntry::Upsert { record } => record,
+                TxEntry::Delete { record } => record,
+            };
+
+            let serialized = record.serialize();
+            let record_offset = initial_data_offset + serialized_data.len() as u64;
+            let record_length = serialized.len() as u64;
+            assert!(record_length > 0);
+
+            serialized_data.extend(serialized);
+
+            let metadata_pos = initial_metadata_offset + serialized_metadata.len() as u64;
+            let metadata_index =
+                (metadata_pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
+
+            // Write the record metadata to the metadata file
+            let mut metadata_buf = vec![];
+            metadata_buf.extend(record_offset.to_be_bytes().into_iter());
+            metadata_buf.extend(record_length.to_be_bytes().into_iter());
+
+            assert_eq!(metadata_buf.len(), 16);
+
+            serialized_metadata.extend(metadata_buf);
+
+            let log_key = LogKey::new(segment_num, metadata_index);
+            pending_memtable_ops.push((log_key, tx_entry.clone()));
+        }
+
+        debug!("Writing serialized bytearrays to log files");
+        self.active_data_file.write_all(&serialized_data)?;
+        self.active_metadata_file.write_all(&serialized_metadata)?;
+
+        // Flush and sync data and metadata to disk
+        if self.config.write_durability == WriteDurability::Flush {
+            self.active_data_file.flush()?;
+            self.active_metadata_file.flush()?;
+        } else if self.config.write_durability == WriteDurability::FlushSync {
+            self.active_data_file.flush()?;
+            self.active_data_file.sync_all()?;
+            self.active_metadata_file.flush()?;
+            self.active_metadata_file.sync_all()?;
+        }
+
+        debug!("Updating memtables");
+        for (log_key, tx_entry) in pending_memtable_ops {
+            match tx_entry {
+                TxEntry::Upsert { record } => self.insert_record_to_memtables(log_key, record),
+                TxEntry::Delete { record } => self.remove_record_from_memtables(&record),
+            }
+        }
+        debug!("Commit done");
+
+        Ok(())
     }
 
     pub fn do_maintenance_tasks(&mut self) -> DBResult<()> {
@@ -719,17 +721,30 @@ impl<R: Recordable> Engine<R> {
         &mut self,
         f: impl FnOnce(&mut Self) -> DBResult<T>,
     ) -> DBResult<T> {
-        self.lock_manager.lock_exclusive()?;
+        // No need to acquire a lock if a transaction is already active
+        // because the lock is already held.
+        if !self.tx_active {
+            self.lock_manager.lock_exclusive()?;
+        }
         let result = f(self);
-        self.lock_manager.unlock()?;
+        if !self.tx_active {
+            self.lock_manager.unlock()?;
+        }
         result
     }
 
     #[inline]
     pub fn with_shared_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> DBResult<T>) -> DBResult<T> {
-        self.lock_manager.lock_shared()?;
+        // No need to acquire a lock if a transaction is already active
+        // because the lock is already held.
+        if !self.tx_active {
+            self.lock_manager.lock_shared()?;
+        }
         let result = f(self);
-        self.lock_manager.unlock()?;
+        if !self.tx_active {
+            self.lock_manager.unlock()?;
+        }
+
         result
     }
 }

@@ -27,6 +27,10 @@ pub fn tmp_dir() -> String {
 #[ctor]
 fn init_logger() {
     let _ = env_logger::builder().is_test(true).try_init();
+
+    // todo add panic hook stuff
+    // - https://stackoverflow.com/questions/54917373/retrieving-backtrace-from-a-panic-in-hook-in-rust
+    // - https://github.com/sndels/yuki/blob/e86b379165ec657197b1c14b78164bd09a8aa1dc/yuki/src/main.rs#L74
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -36,6 +40,7 @@ enum Field {
     Data,
 }
 
+#[derive(Debug)]
 struct Inst {
     pub id: i64,
     pub name: Option<String>,
@@ -646,4 +651,70 @@ fn test_batch_find_by() {
         result.iter().map(|(_, inst)| inst.id).collect::<Vec<i64>>(),
         vec![2, 3, 4]
     );
+}
+
+#[test]
+fn test_commit_transaction() {
+    let data_dir = tmp_dir();
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    db.tx_begin().expect("Failed to begin transaction");
+
+    db.upsert(Inst {
+        id: 0,
+        name: Some("John".to_string()),
+        data: vec![3, 4, 5],
+    })
+    .unwrap();
+
+    db.upsert(Inst {
+        id: 1,
+        name: Some("John".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
+
+    db.tx_commit().expect("Failed to commit transaction");
+
+    let johns = db
+        .find_by(&Field::Name, &Value::String("John".to_string()))
+        .unwrap();
+
+    assert_eq!(johns.len(), 2);
+}
+
+#[test]
+fn test_rollback_transaction() {
+    let data_dir = tmp_dir();
+    let mut db = DB::<Inst>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    db.tx_begin().expect("Failed to begin transaction");
+
+    db.upsert(Inst {
+        id: 0,
+        name: Some("John".to_string()),
+        data: vec![3, 4, 5],
+    })
+    .unwrap();
+
+    db.upsert(Inst {
+        id: 1,
+        name: Some("John".to_string()),
+        data: vec![1, 2, 3],
+    })
+    .unwrap();
+
+    db.tx_rollback().expect("Failed to rollback transaction");
+
+    let johns = db
+        .find_by(&Field::Name, &Value::String("John".to_string()))
+        .unwrap();
+
+    assert_eq!(johns.len(), 0);
 }
