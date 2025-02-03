@@ -1,7 +1,6 @@
 #[macro_use]
 extern crate log;
 
-use fs2::{lock_contended_error, FileExt};
 use once_cell::sync::Lazy;
 use rust_decimal::Decimal;
 use std::cmp::Ordering;

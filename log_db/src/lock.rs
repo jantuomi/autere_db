@@ -29,16 +29,16 @@ impl LockManager {
     fn is_exclusive_lock_requested(&self) -> DBResult<bool> {
         // Attempt to acquire a shared lock on the lock request file
         // If the file is already locked, return false
-        match self.excl_lock_file.try_lock_shared() {
+        match fs2::FileExt::try_lock_shared(&self.excl_lock_file) {
             Err(e) => {
-                if e.kind() == lock_contended_error().kind() {
+                if e.kind() == fs2::lock_contended_error().kind() {
                     return Ok(true);
                 }
                 return Err(DBError::IOError(e));
             }
 
             Ok(_) => {
-                self.excl_lock_file.unlock()?;
+                fs2::FileExt::unlock(&self.excl_lock_file)?;
                 return Ok(false);
             }
         }
@@ -71,7 +71,7 @@ impl LockManager {
                     ));
                 }
             } else {
-                self.lock_file.lock_shared()?;
+                fs2::FileExt::lock_shared(&self.lock_file)?;
                 self.state = LockState::Shared;
                 return Ok(());
             }
@@ -91,14 +91,14 @@ impl LockManager {
 
         // Create a lock on the exclusive lock request file to signal to readers that they should wait
         // This will block until the lock is acquired
-        self.excl_lock_file.lock_exclusive()?;
+        fs2::FileExt::lock_exclusive(&self.excl_lock_file)?;
 
         // Acquire an exclusive lock on the actual lock files
-        self.lock_file.lock_exclusive()?;
+        fs2::FileExt::lock_exclusive(&self.lock_file)?;
         self.state = LockState::Exclusive;
 
         // Unlock the request file
-        self.excl_lock_file.unlock()?;
+        fs2::FileExt::unlock(&self.excl_lock_file)?;
 
         Ok(())
     }
@@ -110,7 +110,7 @@ impl LockManager {
             ));
         }
 
-        self.lock_file.unlock()?;
+        fs2::FileExt::unlock(&self.lock_file)?;
         self.state = LockState::NotLocked;
         Ok(())
     }
