@@ -8,18 +8,16 @@ LogDB has the following features:
 - In-memory indexes for fast lookups (primary and secondary)
 - Log rotation and compaction for efficient storage even with larger databases
 - Multiple concurrent readers and a single writer, using filesystem locks for synchronization
-- Simple data types: `Int`, `Float`, `String`, `Bytes` (arbitrary bytestring), and `Null`
+- Simple data types: `Int`, `Decimal`, `String`, `Bytes` (arbitrary bytestring), and `Null`
 - A Rust API for interacting with the database, as well as Python bindings for the Rust API
+- Transactions based on eager exclusive locking
+- Batch read operations for improved performance
 
 LogDB does not support:
 
 - Authentication or authorization in any capacity
 - Multiple tables
 - Schema evolution, other than adding new nullable fields
-
-Possible future features:
-
-- Transactions
 
 See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation of LogDB.
 
@@ -47,28 +45,89 @@ Then use it in your code like so:
 ```rust
 use log_db::*;
 
-// Configure and initialize the database
-let mut db = DB::configure()
-  .fields(vec![
-    (Field::Id, ValueType::int()),
-    (Field::Data, ValueType::bytes()),
-  ])
-  .primary_key(Field::Id)
-  .initialize()?;
+// Define a type that represents your fields (columns)
+#[derive(Eq, PartialEq, Clone, Debug)]
+enum Field {
+    Id,
+    Name,
+}
 
-// Define a record matching the `fields` schema
-let record = Record {
-  values: vec![
-    Value::Int(1),
-    Value::Bytes(vec![1, 2, 3, 4]),
-  ],
-};
+// Define your data type that represents a database row
+struct Inst {
+    pub id: i64,
+    pub name: Option<String>,
+}
 
-// Insert or update the record based on the primary key (ID, first value)
-db.upsert(&record)?;
+// Implement the `Recordable` trait for your data type
+impl Recordable for Inst {
+  // Use the `Field` enum
+  type Field = Field;
 
-// Get the record by primary key
-let found = db.get(Value::Int(1))?;
+  // Define the schema as a vector of field names and corresponding types
+  fn schema() -> Vec<(Self::Field, Type)> {
+    vec![
+      (Field::Id, Type::int()),
+      (Field::Name, Type::string().nullable()),
+    ]
+  }
+
+  // Select the primary key field
+  fn primary_key() -> Self::Field {
+    Field::Id
+  }
+
+  // Select the secondary key fields. All queries must be
+  // based on the primary key or secondary keys.
+  fn secondary_keys() -> Vec<Self::Field> {
+    vec![Field::Name]
+  }
+
+  // Describe how to convert the data type to a vector of `Value`s
+  fn into_record(self) -> Vec<Value> {
+    vec![
+      Value::Int(self.id),
+      match self.name {
+        Some(name) => Value::String(name),
+        None => Value::Null,
+      },
+    ]
+  }
+
+  // Similarly, describe how to convert a vector of database values to the data type
+  fn from_record(record: Vec<Value>) -> Self {
+    let mut it = record.into_iter();
+
+    Inst {
+      id: match it.next().unwrap() {
+        Value::Int(id) => id,
+        other => panic!("Invalid value type: {:?}", other),
+      },
+      name: match it.next().unwrap() {
+        Value::String(name) => Some(name),
+        Value::Null => None,
+        other => panic!("Invalid value type: {:?}", other),
+      },
+    }
+  }
+}
+
+fn main() {
+  // Initialize the database
+  let mut db = DB::<Inst>::configure()
+    .data_dir("data")
+    .initialize()?;
+
+  // Insert or update the record based on the primary key
+  db.upsert(Inst {
+    id: 1,
+    name: Some("Alice".to_string()),
+  })?;
+
+  // Get the record by primary key
+  let found = db.get(Value::Int(1))?;
+
+  ...
+}
 ```
 
 ## Tests
