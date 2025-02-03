@@ -714,3 +714,152 @@ fn test_rollback_transaction() {
 
     assert_eq!(johns.len(), 0);
 }
+
+#[derive(Eq, PartialEq, Clone, Debug)]
+enum FieldWithNewNullableField {
+    Id,
+    Name,
+    Data,
+    MaybeStr,
+}
+
+struct InstWithNewNullableField {
+    pub id: i64,
+    pub name: Option<String>,
+    pub data: Vec<u8>,
+    pub maybe_str: Option<String>,
+}
+
+impl Recordable for InstWithNewNullableField {
+    type Field = FieldWithNewNullableField;
+
+    fn schema() -> Vec<(Self::Field, Type)> {
+        vec![
+            (FieldWithNewNullableField::Id, Type::int()),
+            (FieldWithNewNullableField::Name, Type::string().nullable()),
+            (FieldWithNewNullableField::Data, Type::bytes()),
+            (
+                FieldWithNewNullableField::MaybeStr,
+                Type::string().nullable(),
+            ),
+        ]
+    }
+
+    fn primary_key() -> Self::Field {
+        FieldWithNewNullableField::Id
+    }
+
+    fn secondary_keys() -> Vec<Self::Field> {
+        vec![FieldWithNewNullableField::Name]
+    }
+
+    fn into_record(self) -> Vec<Value> {
+        vec![
+            Value::Int(self.id),
+            match self.name {
+                Some(name) => Value::String(name),
+                None => Value::Null,
+            },
+            Value::Bytes(self.data),
+            match self.maybe_str {
+                Some(maybe_str) => Value::String(maybe_str),
+                None => Value::Null,
+            },
+        ]
+    }
+
+    fn from_record(record: Vec<Value>) -> Self {
+        let mut it = record.into_iter();
+
+        InstWithNewNullableField {
+            id: match it.next().unwrap() {
+                Value::Int(id) => id,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+            name: match it.next().unwrap() {
+                Value::String(name) => Some(name),
+                Value::Null => None,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+            data: match it.next().unwrap() {
+                Value::Bytes(data) => data,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+            maybe_str: match it.next() {
+                Some(Value::String(maybe_str)) => Some(maybe_str),
+                Some(Value::Null) => None,
+                None => None,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_add_nullable_field() {
+    let data_dir = tmp_dir();
+
+    // Insert a record with 3 fields
+    {
+        let mut db = DB::<Inst>::configure()
+            .data_dir(&data_dir)
+            .initialize()
+            .expect("Failed to initialize DB instance");
+
+        db.upsert(Inst {
+            id: 0,
+            name: Some("John".to_string()),
+            data: vec![3, 4, 5],
+        })
+        .unwrap();
+    }
+
+    // Insert a record with 4 fields (last is nullable)
+    let mut db = DB::<InstWithNewNullableField>::configure()
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    db.upsert(InstWithNewNullableField {
+        id: 1,
+        name: Some("John".to_string()),
+        data: vec![3, 4, 5],
+        maybe_str: None,
+    })
+    .unwrap();
+
+    let johns = db
+        .find_by(
+            &FieldWithNewNullableField::Name,
+            &Value::String("John".to_string()),
+        )
+        .unwrap();
+
+    assert_eq!(johns.len(), 2);
+}
+
+#[test]
+fn test_add_non_nullable_field() {
+    let data_dir = tmp_dir();
+
+    // Insert a record with just one field
+    {
+        let mut db = DB::<InstSingleId>::configure()
+            .data_dir(&data_dir)
+            .initialize()
+            .expect("Failed to initialize DB instance");
+
+        db.upsert(InstSingleId { id: 0 }).unwrap();
+    }
+
+    // Configure the DB with three fields, one of which is non-nullable
+    // This should fail
+    match DB::<Inst>::configure().data_dir(&data_dir).initialize() {
+        Ok(_) => panic!("Expected initialization to fail"),
+        Err(DBError::ValidationError(e)) => {
+            // Expected
+            error!("Expected: {:?}", e);
+        }
+        Err(e) => panic!("Unexpected error: {:?}", e),
+    }
+}

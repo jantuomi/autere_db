@@ -163,6 +163,9 @@ impl<R: Recordable> Engine<R> {
             for ForwardLogReaderItem { record, index } in
                 ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
             {
+                // Validate that the values in the record are compatible with the schema
+                record.validate(&self.config.fields)?;
+
                 let log_key = LogKey::new(segnum, index);
 
                 if record.tombstone {
