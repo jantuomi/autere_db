@@ -27,10 +27,6 @@ pub fn tmp_dir() -> String {
 #[ctor]
 fn init_logger() {
     let _ = env_logger::builder().is_test(true).try_init();
-
-    // todo add panic hook stuff
-    // - https://stackoverflow.com/questions/54917373/retrieving-backtrace-from-a-panic-in-hook-in-rust
-    // - https://github.com/sndels/yuki/blob/e86b379165ec657197b1c14b78164bd09a8aa1dc/yuki/src/main.rs#L74
 }
 
 #[derive(Eq, PartialEq, Clone, Debug)]

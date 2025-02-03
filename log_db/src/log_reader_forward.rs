@@ -92,13 +92,20 @@ impl Iterator for ForwardLogReader {
 
 #[cfg(test)]
 mod tests {
+    use ctor::ctor;
+    use env_logger;
+
     use super::*;
+
+    #[ctor]
+    fn init_logger() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
 
     const TEST_RESOURCES_DIR: &str = "tests/resources";
 
     #[test]
     fn test_forward_log_reader_fixture_db1() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let metadata_path = Path::new(TEST_RESOURCES_DIR).join("test_metadata_1");
         let data_path = Path::new(TEST_RESOURCES_DIR).join("test_data_1");
         let metadata_file = fs::OpenOptions::new()

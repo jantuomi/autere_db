@@ -231,9 +231,16 @@ impl<R: Recordable> DB<R> {
 
 #[cfg(test)]
 mod tests {
+    use ctor::ctor;
+    use env_logger;
     use std::collections::HashSet;
 
     use super::*;
+
+    #[ctor]
+    fn init_logger() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
 
     #[derive(Eq, PartialEq, Clone, Debug)]
     enum Field {
