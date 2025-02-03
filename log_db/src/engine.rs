@@ -318,11 +318,9 @@ impl<R: Recordable> Engine<R> {
         debug!("Found log keys in memtable: {:?}", log_key_batches);
 
         let mut tagged = vec![];
-        let mut tag: usize = 0;
-        for batch in log_key_batches {
+        for (tag, batch) in log_key_batches.into_iter().enumerate() {
             let mapped = batch.into_iter().map(|log_key| (tag, log_key));
             tagged.extend(mapped);
-            tag += 1;
         }
 
         let tagged_records = self.read_tagged_log_keys(tagged.into_iter())?;
@@ -513,8 +511,10 @@ impl<R: Recordable> Engine<R> {
         let initial_data_offset = self.active_data_file.seek(SeekFrom::End(0))?;
         let initial_metadata_offset = self.active_metadata_file.seek(SeekFrom::End(0))?;
         let mut serialized_data: Vec<u8> = vec![];
-        let mut serialized_metadata: Vec<u8> = vec![];
+        let mut serialized_metadata: Vec<u8> = Vec::with_capacity(self.tx_log.len() * 16);
         let mut pending_memtable_ops: Vec<(LogKey, TxEntry)> = vec![];
+
+        let mut metadata_buf = [0u8; 16];
 
         debug!("Serializing tx_log to byte arrays");
         for tx_entry in &self.tx_log {
@@ -534,14 +534,11 @@ impl<R: Recordable> Engine<R> {
             let metadata_index =
                 (metadata_pos - METADATA_FILE_HEADER_SIZE as u64) / METADATA_ROW_LENGTH as u64;
 
-            // Write the record metadata to the metadata file
-            let mut metadata_buf = vec![];
-            metadata_buf.extend(record_offset.to_be_bytes().into_iter());
-            metadata_buf.extend(record_length.to_be_bytes().into_iter());
+            // Write the record metadata to the fixed-size metadata buffer
+            metadata_buf[..8].copy_from_slice(&record_offset.to_be_bytes());
+            metadata_buf[8..].copy_from_slice(&record_length.to_be_bytes());
 
-            assert_eq!(metadata_buf.len(), 16);
-
-            serialized_metadata.extend(metadata_buf);
+            serialized_metadata.extend_from_slice(&metadata_buf);
 
             let log_key = LogKey::new(segment_num, metadata_index);
             pending_memtable_ops.push((log_key, tx_entry.clone()));
@@ -661,12 +658,12 @@ impl<R: Recordable> Engine<R> {
 
         temp_metadata_file.write_all(&metadata_header.serialize())?;
 
+        let mut metadata_buf = [0u8; 16];
         for (pk, _) in forward_read_items.iter() {
             let (offset, len) = pk_to_data_map.get(&pk).unwrap();
 
-            let mut metadata_buf = vec![];
-            metadata_buf.extend(offset.to_be_bytes().into_iter());
-            metadata_buf.extend(len.to_be_bytes().into_iter());
+            metadata_buf[..8].copy_from_slice(&offset.to_be_bytes());
+            metadata_buf[8..].copy_from_slice(&len.to_be_bytes());
 
             temp_metadata_file.write_all(&metadata_buf)?;
         }

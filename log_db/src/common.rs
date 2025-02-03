@@ -170,14 +170,11 @@ pub struct MetadataHeader {
 
 const METADATA_HEADER_PADDING: &[u8] = &[0; 7];
 impl MetadataHeader {
-    pub fn serialize(&self) -> Vec<u8> {
-        let uuid_bytes = self.uuid.as_bytes().to_vec();
-
-        let mut header = vec![self.version];
-        header.extend(METADATA_HEADER_PADDING);
-        header.extend(uuid_bytes);
-
-        assert_eq!(header.len(), METADATA_FILE_HEADER_SIZE);
+    pub fn serialize(&self) -> [u8; METADATA_FILE_HEADER_SIZE] {
+        let mut header = [0u8; METADATA_FILE_HEADER_SIZE];
+        header[0] = self.version;
+        header[1..8].copy_from_slice(METADATA_HEADER_PADDING);
+        header[8..].copy_from_slice(self.uuid.as_bytes());
 
         header
     }
@@ -278,31 +275,33 @@ impl Eq for Value {}
 impl Value {
     pub fn serialize(&self) -> Vec<u8> {
         match self {
-            Value::Null => {
-                vec![B_NULL]
-            }
+            Value::Null => vec![B_NULL],
             Value::Int(i) => {
-                let mut bytes = vec![B_INT];
-                bytes.extend(i.to_be_bytes());
+                let mut bytes = Vec::with_capacity(1 + 16);
+                bytes.push(B_INT);
+                bytes.extend_from_slice(&i.to_be_bytes());
                 bytes
             }
             Value::Decimal(d) => {
-                let mut bytes = vec![B_DECIMAL];
-                bytes.extend(d.serialize()); // 16 bytes
+                let mut bytes = Vec::with_capacity(1 + 16);
+                bytes.push(B_DECIMAL);
+                bytes.extend_from_slice(&d.serialize());
                 bytes
             }
             Value::String(s) => {
-                let mut bytes = vec![B_STRING];
-                let length = s.len() as u64;
-                bytes.extend(length.to_be_bytes());
-                bytes.extend(s.as_bytes());
+                let len = s.len();
+                let mut bytes = Vec::with_capacity(1 + 8 + len);
+                bytes.push(B_STRING);
+                bytes.extend_from_slice(&(len as u64).to_be_bytes());
+                bytes.extend_from_slice(s.as_bytes());
                 bytes
             }
             Value::Bytes(b) => {
-                let mut bytes = vec![B_BYTES];
-                let length = b.len() as u64;
-                bytes.extend(length.to_be_bytes());
-                bytes.extend(b);
+                let len = b.len();
+                let mut bytes = Vec::with_capacity(1 + 8 + len);
+                bytes.push(B_BYTES);
+                bytes.extend_from_slice(&(len as u64).to_be_bytes());
+                bytes.extend_from_slice(b);
                 bytes
             }
         }
