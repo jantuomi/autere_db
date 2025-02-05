@@ -27,9 +27,8 @@ mod memtable_primary;
 mod memtable_secondary;
 mod record;
 
-pub use common::{DBError, DBResult, Type, Value};
-pub use config::{ReadConsistency, WriteDurability};
-pub use record::Recordable;
+pub use common::{DBError, DBResult, OwnedBounds, Type, Value};
+pub use config::{ReadConsistency, Schema, WriteDurability};
 
 use common::*;
 use config::*;
@@ -40,28 +39,28 @@ use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
 use record::*;
 
-pub struct DB<R: Recordable> {
-    engine: Engine<R>,
+pub struct DB<T, F: Eq + Clone> {
+    engine: Engine<T, F>,
 }
 
-impl<R: Recordable> DB<R> {
+impl<T, F: Eq + Clone> DB<T, F> {
     /// Create a new database configuration builder.
-    pub fn configure() -> ConfigBuilder<R> {
+    pub fn configure() -> ConfigBuilder<T, F> {
         ConfigBuilder::new()
     }
 
-    fn initialize(config: Config<R>) -> DBResult<DB<R>> {
+    fn initialize(config: Config<T, F>) -> DBResult<DB<T, F>> {
         let engine = Engine::initialize(config)?;
         Ok(DB { engine })
     }
 
     /// Insert a record into the database. If the primary key value already exists,
     /// the existing record will be replaced by the supplied one.
-    pub fn upsert(&mut self, recordable: R) -> DBResult<()> {
-        let record = Record::from(&recordable.into_record());
+    pub fn upsert(&mut self, recordable: T) -> DBResult<()> {
+        let record = Record::from(&(self.engine.config.into_record)(recordable));
         debug!("Upserting record: {:?}", record);
 
-        record.validate(&self.engine.config.fields)?;
+        record.validate(&self.engine.config.schema)?;
         debug!("Record is valid");
 
         self.engine
@@ -72,7 +71,7 @@ impl<R: Recordable> DB<R> {
 
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
-    pub fn get(&mut self, value: &Value) -> DBResult<Option<R>> {
+    pub fn get(&mut self, value: &Value) -> DBResult<Option<T>> {
         let recs = self.engine.with_shared_lock(|engine| {
             engine.batch_find_by_records(
                 // TODO: This clone is only here to appease the borrow checker
@@ -86,54 +85,46 @@ impl<R: Recordable> DB<R> {
         Ok(recs
             .into_iter()
             .next()
-            .map(|(_, rec)| R::from_record(rec.values)))
+            .map(|(_, rec)| (self.engine.config.from_record)(rec.values)))
     }
 
     /// Get a collection of records based on an indexed field value.
-    pub fn find_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
+    pub fn find_by(&mut self, field: &F, value: &Value) -> DBResult<Vec<T>> {
         let recs = self.engine.with_shared_lock(|engine| {
             engine.batch_find_by_records(field, std::iter::once(value))
         })?;
 
         Ok(recs
             .into_iter()
-            .map(|(_, rec)| R::from_record(rec.values))
+            .map(|(_, rec)| (self.engine.config.from_record)(rec.values))
             .collect())
     }
 
     /// Get a collection of records based on a sequence of indexed field values.
     /// Returns a vector of pairs where the first value is an index into the given sequence of values,
     /// and the second value is the record.
-    pub fn batch_find_by(
-        &mut self,
-        field: &R::Field,
-        values: &[Value],
-    ) -> DBResult<Vec<(usize, R)>> {
+    pub fn batch_find_by(&mut self, field: &F, values: &[Value]) -> DBResult<Vec<(usize, T)>> {
         let recs = self
             .engine
             .with_shared_lock(|engine| engine.batch_find_by_records(field, values.iter()))?;
 
         Ok(recs
             .into_iter()
-            .map(|(tag, rec)| (tag, R::from_record(rec.values)))
+            .map(|(tag, rec)| (tag, (self.engine.config.from_record)(rec.values)))
             .collect())
     }
 
     /// Get a collection of records based on a range of indexed field values.
     /// This method can be used to run comparison-like queries, e.g. `field >= 10`
     /// could be expressed as `db.range_by(Field::Id, 10..)`.
-    pub fn range_by<B: RangeBounds<Value>>(
-        &mut self,
-        field: &R::Field,
-        range: B,
-    ) -> DBResult<Vec<R>> {
+    pub fn range_by<B: RangeBounds<Value>>(&mut self, field: &F, range: B) -> DBResult<Vec<T>> {
         let recs = self
             .engine
             .with_shared_lock(|engine| engine.range_by_records(field, range))?;
 
         Ok(recs
             .into_iter()
-            .map(|rec| R::from_record(rec.values))
+            .map(|rec| (self.engine.config.from_record)(rec.values))
             .collect())
     }
 
@@ -143,19 +134,19 @@ impl<R: Recordable> DB<R> {
     ///
     /// Deletion is done by marking the record as a tombstone. The record will still be present in the log file,
     /// but will be ignored by reads. Upon compaction, tombstoned records will be removed.
-    pub fn delete_by(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<R>> {
+    pub fn delete_by(&mut self, field: &F, value: &Value) -> DBResult<Vec<T>> {
         let recs = self
             .engine
             .with_exclusive_lock(|engine| engine.delete_by_field(field, value))?;
 
         Ok(recs
             .into_iter()
-            .map(|rec| R::from_record(rec.values))
+            .map(|rec| (self.engine.config.from_record)(rec.values))
             .collect())
     }
 
     /// Delete record by primary key.
-    pub fn delete(&mut self, pk: &Value) -> DBResult<Option<R>> {
+    pub fn delete(&mut self, pk: &Value) -> DBResult<Option<T>> {
         let recs = self.engine.with_exclusive_lock(|engine| {
             engine
                 // TODO: This clone is only here to appease the borrow checker
@@ -167,7 +158,7 @@ impl<R: Recordable> DB<R> {
         Ok(recs
             .into_iter()
             .next()
-            .map(|rec| R::from_record(rec.values)))
+            .map(|rec| (self.engine.config.from_record)(rec.values)))
     }
 
     /// Check if there are any pending tasks and do them. Tasks include:
@@ -258,15 +249,7 @@ mod tests {
         id: i64,
     }
 
-    impl Recordable for TestInst1 {
-        type Field = Field;
-        fn schema() -> Vec<(Field, Type)> {
-            vec![(Field::Id, Type::int())]
-        }
-        fn primary_key() -> Self::Field {
-            Field::Id
-        }
-
+    impl TestInst1 {
         fn into_record(self) -> Vec<Value> {
             vec![Value::Int(self.id)]
         }
@@ -287,15 +270,7 @@ mod tests {
         name: String,
     }
 
-    impl Recordable for TestInst2 {
-        type Field = Field;
-        fn primary_key() -> Self::Field {
-            Field::Id
-        }
-        fn secondary_keys() -> Vec<Self::Field> {
-            vec![Field::Name]
-        }
-
+    impl TestInst2 {
         fn into_record(self) -> Vec<Value> {
             vec![Value::Int(self.id), Value::String(self.name)]
         }
@@ -313,10 +288,6 @@ mod tests {
                 },
             }
         }
-
-        fn schema() -> Vec<(Field, Type)> {
-            vec![(Field::Id, Type::int()), (Field::Name, Type::string())]
-        }
     }
 
     #[test]
@@ -327,8 +298,13 @@ mod tests {
 
         let capacity = 5;
         let segment_size = capacity * 2 * 8 + METADATA_FILE_HEADER_SIZE;
-        let mut db = DB::<TestInst1>::configure()
+
+        let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
+            .schema(vec![(Field::Id, Type::int())])
+            .primary_key(Field::Id)
+            .from_record(TestInst1::from_record)
+            .into_record(TestInst1::into_record)
             .segment_size(segment_size)
             .initialize()
             .expect("Failed to create DB");
@@ -411,8 +387,12 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
-        let mut db = DB::<TestInst1>::configure()
+        let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
+            .schema(vec![(Field::Id, Type::int())])
+            .primary_key(Field::Id)
+            .from_record(TestInst1::from_record)
+            .into_record(TestInst1::into_record)
             .initialize()
             .expect("Failed to create DB");
 
@@ -462,8 +442,16 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
-        let mut db = DB::<TestInst2>::configure()
+        let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
+            .schema(vec![
+                (Field::Id, Type::int()),
+                (Field::Name, Type::string()),
+            ])
+            .primary_key(Field::Id)
+            .secondary_keys(vec![Field::Name])
+            .from_record(TestInst2::from_record)
+            .into_record(TestInst2::into_record)
             .initialize()
             .expect("Failed to create DB");
 

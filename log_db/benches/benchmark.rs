@@ -10,12 +10,17 @@ use utils::*;
 pub fn upsert_compacted(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert_compacted");
     let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-    let data_dir = &data_dir_obj
+    let data_dir = data_dir_obj
         .path()
         .to_str()
         .expect("Failed to convert tmpdir path to str");
-    let mut db = DB::<Inst>::configure()
-        .data_dir(&data_dir)
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
 
@@ -37,12 +42,17 @@ pub fn upsert_compacted(c: &mut Criterion) {
 pub fn delete_existing_compacted(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_existing_compacted");
     let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-    let data_dir = &data_dir_obj
+    let data_dir = data_dir_obj
         .path()
         .to_str()
         .expect("Failed to convert tmpdir path to str");
-    let mut db = DB::<Inst>::configure()
-        .data_dir(&data_dir)
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
 
@@ -71,12 +81,17 @@ pub fn upsert_write_durability(c: &mut Criterion) {
     for mode in [WriteDurability::Flush, WriteDurability::FlushSync] {
         group.bench_with_input(BenchmarkId::from_parameter(&mode), &mode, |b, _mode| {
             let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-            let data_dir = &data_dir_obj
+            let data_dir = data_dir_obj
                 .path()
                 .to_str()
                 .expect("Failed to convert tmpdir path to str");
-            let mut db = DB::<Inst>::configure()
-                .data_dir(&data_dir)
+            let mut db = DB::configure()
+                .schema(Inst::schema())
+                .primary_key(Inst::primary_key())
+                .secondary_keys(Inst::secondary_keys())
+                .from_record(Inst::from_record)
+                .into_record(Inst::into_record)
+                .data_dir(data_dir)
                 .write_durability(mode.clone())
                 .initialize()
                 .expect("Failed to initialize DB");
@@ -94,12 +109,17 @@ pub fn get_existing_compacted(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_existing_compacted");
 
     let data_dir_obj = tempfile::tempdir().expect("Failed to get tmpdir");
-    let data_dir = &data_dir_obj
+    let data_dir = data_dir_obj
         .path()
         .to_str()
         .expect("Failed to convert tmpdir path to str");
-    let mut db = DB::<Inst>::configure()
-        .data_dir(&data_dir)
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
 
@@ -129,8 +149,13 @@ pub fn find_by_existing_compacted(c: &mut Criterion) {
     let data_dir = data_dir_path
         .to_str()
         .expect("Failed to convert tmpdir path to str");
-    let mut db = DB::<Inst>::configure()
-        .data_dir(&data_dir)
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
 

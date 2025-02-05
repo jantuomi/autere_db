@@ -16,30 +16,30 @@ pub struct Inst {
     pub name: String,
     pub data: Vec<u8>,
 }
-impl Recordable for Inst {
-    type Field = Field;
-    fn schema() -> Vec<(Field, Type)> {
+
+impl Inst {
+    pub fn schema() -> Vec<(Field, Type)> {
         vec![
             (Field::Id, Type::int()),
             (Field::Name, Type::string()),
             (Field::Data, Type::bytes()),
         ]
     }
-    fn primary_key() -> Self::Field {
+    pub fn primary_key() -> Field {
         Field::Id
     }
-    fn secondary_keys() -> Vec<Self::Field> {
+    pub fn secondary_keys() -> Vec<Field> {
         vec![Field::Name]
     }
 
-    fn into_record(self) -> Vec<Value> {
+    pub fn into_record(self) -> Vec<Value> {
         vec![
             Value::Int(self.id),
             Value::String(self.name),
             Value::Bytes(self.data),
         ]
     }
-    fn from_record(record: Vec<Value>) -> Self {
+    pub fn from_record(record: Vec<Value>) -> Self {
         let mut it = record.into_iter();
         Inst {
             id: match it.next().unwrap() {
@@ -86,7 +86,7 @@ pub fn random_inst(from_id: i64, to_id: i64) -> Inst {
 }
 
 pub fn prefill_db(
-    db: &mut DB<Inst>,
+    db: &mut DB<Inst, Field>,
     insts: &mut Vec<Inst>,
     n_records: usize,
     compact: bool,

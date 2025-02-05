@@ -1,7 +1,7 @@
 use super::*;
 
-pub struct Engine<R: Recordable> {
-    pub config: Config<R>,
+pub struct Engine<T, F: Eq + Clone> {
+    pub config: Config<T, F>,
     pub lock_manager: LockManager,
 
     data_dir_path: PathBuf,
@@ -19,8 +19,8 @@ pub struct Engine<R: Recordable> {
     pub secondary_memtables: Vec<SecondaryMemtable>,
 }
 
-impl<R: Recordable> Engine<R> {
-    pub fn initialize(config: Config<R>) -> DBResult<Engine<R>> {
+impl<T, F: Eq + Clone> Engine<T, F> {
+    pub fn initialize(config: Config<T, F>) -> DBResult<Engine<T, F>> {
         info!("Initializing DB...");
         // If data_dir does not exist or is empty, create it and any necessary files.
         // After creation, the directory should always be in a complete state without missing files.
@@ -66,7 +66,7 @@ impl<R: Recordable> Engine<R> {
 
         // Calculate the index of the primary value in a record
         let primary_key_index = config
-            .fields
+            .schema
             .iter()
             .position(|(field, _)| field == &config.primary_key)
             .ok_or(DBError::ValidationError(
@@ -80,7 +80,7 @@ impl<R: Recordable> Engine<R> {
         // If any of the keys is not in the schema or
         // is not an IndexableValue, return an error
         for &key in &all_keys {
-            let (_, value_type) = config.fields.iter().find(|(field, _)| field == key).ok_or(
+            let (_, value_type) = config.schema.iter().find(|(field, _)| field == key).ok_or(
                 DBError::ValidationError("Key must be present in the field schema".to_owned()),
             )?;
 
@@ -109,7 +109,7 @@ impl<R: Recordable> Engine<R> {
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = APPEND_MODE.open(&active_data_path)?;
 
-        let mut engine = Engine::<R> {
+        let mut engine = Engine::<T, F> {
             config,
             lock_manager,
             data_dir_path,
@@ -164,7 +164,7 @@ impl<R: Recordable> Engine<R> {
                 ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
             {
                 // Validate that the values in the record are compatible with the schema
-                record.validate(&self.config.fields)?;
+                record.validate(&self.config.schema)?;
 
                 let log_key = LogKey::new(segnum, index);
 
@@ -196,7 +196,7 @@ impl<R: Recordable> Engine<R> {
             let secondary_memtable = &mut self.secondary_memtables[sk_index];
             let sk_field_index = self
                 .config
-                .fields
+                .schema
                 .iter()
                 .position(|(f, _)| sk_field == f)
                 .unwrap();
@@ -214,11 +214,12 @@ impl<R: Recordable> Engine<R> {
         let pk = record.at(self.primary_key_index).as_indexable().unwrap();
 
         if let Some(plk) = self.primary_memtable.remove(&pk) {
+            // TODO this does not work (test_delete_by_multiple_indexes)
             for (sk_index, sk_field) in self.config.secondary_keys.iter_mut().enumerate() {
                 let secondary_memtable = &mut self.secondary_memtables[sk_index];
                 let sk_field_index = self
                     .config
-                    .fields
+                    .schema
                     .iter()
                     .position(|(f, _)| sk_field == f)
                     .unwrap();
@@ -254,7 +255,7 @@ impl<R: Recordable> Engine<R> {
 
     pub fn batch_find_by_records<'a>(
         &mut self,
-        field: &R::Field,
+        field: &F,
         values: impl Iterator<Item = &'a Value>,
     ) -> DBResult<Vec<(usize, Record)>> {
         let field_type = self.get_field_type(field).ok_or(DBError::ValidationError(
@@ -277,10 +278,7 @@ impl<R: Recordable> Engine<R> {
             .collect::<DBResult<Vec<IndexableValue>>>()?;
 
         // Otherwise, continue with querying secondary indexes.
-        debug!(
-            "Finding all records with fields {:?} = {:?}",
-            field, indexables
-        );
+        debug!("Finding all records with matching fields");
 
         if self.config.read_consistency == ReadConsistency::Strong {
             self.refresh_indexes()?;
@@ -395,7 +393,7 @@ impl<R: Recordable> Engine<R> {
 
     pub fn range_by_records<B: RangeBounds<Value>>(
         &mut self,
-        field: &R::Field,
+        field: &F,
         range: B,
     ) -> DBResult<Vec<Record>> {
         fn range_bound_to_indexable(
@@ -479,7 +477,7 @@ impl<R: Recordable> Engine<R> {
         }
     }
 
-    pub fn delete_by_field(&mut self, field: &R::Field, value: &Value) -> DBResult<Vec<Record>> {
+    pub fn delete_by_field(&mut self, field: &F, value: &Value) -> DBResult<Vec<Record>> {
         let recs: Vec<Record> = self
             .batch_find_by_records(field, std::iter::once(value))?
             .into_iter()
@@ -708,19 +706,19 @@ impl<R: Recordable> Engine<R> {
     }
 
     #[inline]
-    fn get_field_type(&self, field: &R::Field) -> Option<&Type> {
+    fn get_field_type(&self, field: &F) -> Option<&Type> {
         self.config
-            .fields
+            .schema
             .iter()
             .find(|(f, _)| f == field)
             .map(|(_, t)| t)
     }
 
     #[inline]
-    pub fn with_exclusive_lock<T>(
+    pub fn with_exclusive_lock<A>(
         &mut self,
-        f: impl FnOnce(&mut Self) -> DBResult<T>,
-    ) -> DBResult<T> {
+        f: impl FnOnce(&mut Self) -> DBResult<A>,
+    ) -> DBResult<A> {
         // No need to acquire a lock if a transaction is already active
         // because the lock is already held.
         if !self.tx_active {
@@ -734,7 +732,7 @@ impl<R: Recordable> Engine<R> {
     }
 
     #[inline]
-    pub fn with_shared_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> DBResult<T>) -> DBResult<T> {
+    pub fn with_shared_lock<A>(&mut self, f: impl FnOnce(&mut Self) -> DBResult<A>) -> DBResult<A> {
         // No need to acquire a lock if a transaction is already active
         // because the lock is already held.
         if !self.tx_active {

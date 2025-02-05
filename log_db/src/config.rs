@@ -1,27 +1,47 @@
 use super::*;
 
-pub struct ConfigBuilder<R: Recordable> {
+pub struct Schema<F> {
+    pub fields: Vec<(F, Type)>,
+    pub primary_key: F,
+    pub secondary_keys: Vec<F>,
+}
+
+pub struct ConfigBuilder<T, F> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
     write_durability: Option<WriteDurability>,
     read_consistency: Option<ReadConsistency>,
-    _marker: PhantomData<R>,
+
+    schema: Option<Vec<(F, Type)>>,
+    primary_key: Option<F>,
+    secondary_keys: Option<Vec<F>>,
+    from_record: Option<fn(Vec<Value>) -> T>,
+    into_record: Option<fn(T) -> Vec<Value>>,
+
+    _marker: PhantomData<T>,
 }
 
-impl<R: Recordable> ConfigBuilder<R> {
-    pub fn new() -> ConfigBuilder<R> {
+impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
+    pub fn new() -> ConfigBuilder<T, F> {
         ConfigBuilder {
             data_dir: None,
             segment_size: None,
             write_durability: None,
             read_consistency: None,
+
+            schema: None,
+            primary_key: None,
+            secondary_keys: None,
+            from_record: None,
+            into_record: None,
+
             _marker: PhantomData,
         }
     }
 
     /// The directory where the database will store its data.
-    pub fn data_dir(&mut self, data_dir: &str) -> &mut Self {
-        self.data_dir = Some(data_dir.to_string());
+    pub fn data_dir(mut self, data_dir: impl Into<String>) -> Self {
+        self.data_dir = Some(data_dir.into());
         self
     }
 
@@ -29,7 +49,7 @@ impl<R: Recordable> ConfigBuilder<R> {
     /// Once a segment file reaches this size, it can be closed, rotated and compacted.
     /// Note that this is not a hard limit: if `db.do_maintenance_tasks()` is not called,
     /// the segment file may continue to grow.
-    pub fn segment_size(&mut self, segment_size: usize) -> &mut Self {
+    pub fn segment_size(mut self, segment_size: usize) -> Self {
         self.segment_size = Some(segment_size);
         self
     }
@@ -37,7 +57,7 @@ impl<R: Recordable> ConfigBuilder<R> {
     /// The write durability policy for the database.
     /// This determines how writes are persisted to disk.
     /// The default is WriteDurability::Flush.
-    pub fn write_durability(&mut self, write_durability: WriteDurability) -> &mut Self {
+    pub fn write_durability(mut self, write_durability: WriteDurability) -> Self {
         self.write_durability = Some(write_durability);
         self
     }
@@ -46,16 +66,57 @@ impl<R: Recordable> ConfigBuilder<R> {
     /// This determines how recent writes are visible when reading.
     /// See individual `ReadConsistency` enum values for more information.
     /// The default is ReadConsistency::Strong.
-    pub fn read_consistency(&mut self, read_consistency: ReadConsistency) -> &mut Self {
+    pub fn read_consistency(mut self, read_consistency: ReadConsistency) -> Self {
         self.read_consistency = Some(read_consistency);
         self
     }
 
-    pub fn initialize(&self) -> DBResult<DB<R>> {
+    pub fn schema(mut self, schema: Vec<(F, Type)>) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn primary_key(mut self, primary_key: F) -> Self {
+        self.primary_key = Some(primary_key);
+        self
+    }
+
+    pub fn secondary_keys(mut self, secondary_keys: Vec<F>) -> Self {
+        self.secondary_keys = Some(secondary_keys);
+        self
+    }
+
+    pub fn from_record(mut self, from_record: fn(Vec<Value>) -> T) -> Self {
+        self.from_record = Some(from_record);
+        self
+    }
+
+    pub fn into_record(mut self, into_record: fn(T) -> Vec<Value>) -> Self {
+        self.into_record = Some(into_record);
+        self
+    }
+
+    pub fn initialize(self) -> DBResult<DB<T, F>> {
+        let schema = self
+            .schema
+            .ok_or_else(|| DBError::ValidationError("Schema not set".to_string()))?;
+        let primary_key = self
+            .primary_key
+            .ok_or_else(|| DBError::ValidationError("Primary key not set".to_string()))?;
+        let from_record = self
+            .from_record
+            .ok_or_else(|| DBError::ValidationError("Callback from_record not set".to_string()))?;
+        let into_record = self
+            .into_record
+            .ok_or_else(|| DBError::ValidationError("Callback into_record not set".to_string()))?;
+
         let config = Config {
-            fields: R::schema(),
-            primary_key: R::primary_key(),
-            secondary_keys: R::secondary_keys(),
+            schema,
+            primary_key,
+            secondary_keys: self.secondary_keys.unwrap_or_default(),
+            from_record,
+            into_record,
+
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
             segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
             write_durability: self
@@ -73,10 +134,12 @@ impl<R: Recordable> ConfigBuilder<R> {
 }
 
 #[derive(Clone)]
-pub struct Config<R: Recordable> {
-    pub fields: Vec<(R::Field, Type)>,
-    pub primary_key: R::Field,
-    pub secondary_keys: Vec<R::Field>,
+pub struct Config<T, F> {
+    pub schema: Vec<(F, Type)>,
+    pub primary_key: F,
+    pub secondary_keys: Vec<F>,
+    pub from_record: fn(Vec<Value>) -> T,
+    pub into_record: fn(T) -> Vec<Value>,
     pub data_dir: String,
     pub segment_size: usize,
     pub write_durability: WriteDurability,

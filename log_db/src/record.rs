@@ -114,25 +114,6 @@ impl Record {
     }
 }
 
-/// A trait that describes how to convert a data structure into a database record and vice versa.
-pub trait Recordable {
-    /// The field type of the data structure implementing the `Recordable` trait.
-    type Field: Eq + Clone + Debug;
-    /// Define the schema of the instance implementing the `Recordable` trait.
-    fn schema() -> Vec<(Self::Field, Type)>;
-    /// Define the primary key of the instance implementing the `Recordable` trait.
-    fn primary_key() -> Self::Field;
-    /// Define the secondary keys of the instance implementing the `Recordable` trait.
-    fn secondary_keys() -> Vec<Self::Field> {
-        Vec::new()
-    }
-
-    /// Convert the data structure implementing the `Recordable` trait into a vector of database values.
-    fn into_record(self) -> Vec<Value>;
-    /// Convert a vector of database values into the data structure implementing the `Recordable` trait.
-    fn from_record(record: Vec<Value>) -> Self;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

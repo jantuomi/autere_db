@@ -43,19 +43,18 @@ struct Inst {
     pub data: Vec<u8>,
 }
 
-impl Recordable for Inst {
-    type Field = Field;
-    fn schema() -> Vec<(Self::Field, Type)> {
+impl Inst {
+    fn schema() -> Vec<(Field, Type)> {
         vec![
             (Field::Id, Type::int()),
             (Field::Name, Type::string().nullable()),
             (Field::Data, Type::bytes()),
         ]
     }
-    fn primary_key() -> Self::Field {
+    fn primary_key() -> Field {
         Field::Id
     }
-    fn secondary_keys() -> Vec<Self::Field> {
+    fn secondary_keys() -> Vec<Field> {
         vec![Field::Name]
     }
 
@@ -94,7 +93,12 @@ impl Recordable for Inst {
 #[test]
 fn test_initialize_only() {
     let data_dir = tmp_dir();
-    let _db = DB::<Inst>::configure()
+    let _db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -103,7 +107,12 @@ fn test_initialize_only() {
 #[test]
 fn test_upsert_and_get_with_primary_memtable() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -125,7 +134,12 @@ fn test_upsert_and_get_with_primary_memtable() {
 #[test]
 fn test_upsert_and_get() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -177,7 +191,12 @@ fn test_upsert_and_get() {
 #[test]
 fn test_get_nonexistant() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -187,13 +206,15 @@ fn test_get_nonexistant() {
 }
 
 struct InstTestNullable {}
-impl Recordable for InstTestNullable {
-    type Field = Field;
-    fn schema() -> Vec<(Self::Field, Type)> {
+impl InstTestNullable {
+    fn schema() -> Vec<(Field, Type)> {
         vec![(Field::Id, Type::int())]
     }
-    fn primary_key() -> Self::Field {
+    fn primary_key() -> Field {
         Field::Id
+    }
+    fn secondary_keys() -> Vec<Field> {
+        vec![]
     }
 
     fn into_record(self) -> Vec<Value> {
@@ -208,7 +229,12 @@ impl Recordable for InstTestNullable {
 #[test]
 fn test_upsert_fails_on_null_in_non_nullable_field() {
     let data_dir = tmp_dir();
-    let mut db = DB::<InstTestNullable>::configure()
+    let mut db = DB::configure()
+        .schema(InstTestNullable::schema())
+        .primary_key(InstTestNullable::primary_key())
+        .secondary_keys(InstTestNullable::secondary_keys())
+        .from_record(InstTestNullable::from_record)
+        .into_record(InstTestNullable::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -218,13 +244,15 @@ fn test_upsert_fails_on_null_in_non_nullable_field() {
 }
 
 struct InstTestNumValues {}
-impl Recordable for InstTestNumValues {
-    type Field = Field;
-    fn schema() -> Vec<(Self::Field, Type)> {
+impl InstTestNumValues {
+    fn schema() -> Vec<(Field, Type)> {
         vec![(Field::Id, Type::int()), (Field::Name, Type::string())]
     }
-    fn primary_key() -> Self::Field {
+    fn primary_key() -> Field {
         Field::Id
+    }
+    fn secondary_keys() -> Vec<Field> {
+        vec![]
     }
 
     fn into_record(self) -> Vec<Value> {
@@ -239,7 +267,12 @@ impl Recordable for InstTestNumValues {
 #[test]
 fn test_upsert_fails_on_invalid_number_of_values() {
     let data_dir = tmp_dir();
-    let mut db = DB::<InstTestNumValues>::configure()
+    let mut db = DB::configure()
+        .schema(InstTestNumValues::schema())
+        .primary_key(InstTestNumValues::primary_key())
+        .secondary_keys(InstTestNumValues::secondary_keys())
+        .from_record(InstTestNumValues::from_record)
+        .into_record(InstTestNumValues::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -249,13 +282,15 @@ fn test_upsert_fails_on_invalid_number_of_values() {
 }
 
 struct InstTestInvalidType {}
-impl Recordable for InstTestInvalidType {
-    type Field = Field;
-    fn schema() -> Vec<(Self::Field, Type)> {
+impl InstTestInvalidType {
+    fn schema() -> Vec<(Field, Type)> {
         vec![(Field::Id, Type::int())]
     }
-    fn primary_key() -> Self::Field {
+    fn primary_key() -> Field {
         Field::Id
+    }
+    fn secondary_keys() -> Vec<Field> {
+        vec![]
     }
 
     fn into_record(self) -> Vec<Value> {
@@ -270,7 +305,12 @@ impl Recordable for InstTestInvalidType {
 #[test]
 fn test_upsert_fails_on_invalid_value_type() {
     let data_dir = tmp_dir();
-    let mut db = DB::<InstTestInvalidType>::configure()
+    let mut db = DB::configure()
+        .schema(InstTestInvalidType::schema())
+        .primary_key(InstTestInvalidType::primary_key())
+        .secondary_keys(InstTestInvalidType::secondary_keys())
+        .from_record(InstTestInvalidType::from_record)
+        .into_record(InstTestInvalidType::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -282,7 +322,12 @@ fn test_upsert_fails_on_invalid_value_type() {
 #[test]
 fn test_upsert_and_find_by() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -321,13 +366,15 @@ struct InstSingleId {
     pub id: i64,
 }
 
-impl Recordable for InstSingleId {
-    type Field = Field;
-    fn schema() -> Vec<(Self::Field, Type)> {
+impl InstSingleId {
+    fn schema() -> Vec<(Field, Type)> {
         vec![(Field::Id, Type::int())]
     }
-    fn primary_key() -> Self::Field {
+    fn primary_key() -> Field {
         Field::Id
+    }
+    fn secondary_keys() -> Vec<Field> {
+        vec![]
     }
 
     fn into_record(self) -> Vec<Value> {
@@ -355,7 +402,12 @@ fn test_multiple_writing_threads() {
     for i in 0..threads_n {
         let data_dir = data_dir.clone();
         threads.push(thread::spawn(move || {
-            let mut db = DB::<InstSingleId>::configure()
+            let mut db = DB::configure()
+                .schema(InstSingleId::schema())
+                .primary_key(InstSingleId::primary_key())
+                .secondary_keys(InstSingleId::secondary_keys())
+                .from_record(InstSingleId::from_record)
+                .into_record(InstSingleId::into_record)
                 .data_dir(&data_dir)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -370,7 +422,12 @@ fn test_multiple_writing_threads() {
     }
 
     // Read the records
-    let mut db = DB::<InstSingleId>::configure()
+    let mut db = DB::configure()
+        .schema(InstSingleId::schema())
+        .primary_key(InstSingleId::primary_key())
+        .secondary_keys(InstSingleId::secondary_keys())
+        .from_record(InstSingleId::from_record)
+        .into_record(InstSingleId::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -396,7 +453,12 @@ fn test_one_writer_and_multiple_reading_threads() {
     for i in 0..threads_n {
         let data_dir = data_dir.clone();
         threads.push(thread::spawn(move || {
-            let mut db = DB::<InstSingleId>::configure()
+            let mut db = DB::configure()
+                .schema(InstSingleId::schema())
+                .primary_key(InstSingleId::primary_key())
+                .secondary_keys(InstSingleId::secondary_keys())
+                .from_record(InstSingleId::from_record)
+                .into_record(InstSingleId::into_record)
                 .data_dir(&data_dir)
                 .segment_size(1000) // should cause rotations
                 .initialize()
@@ -422,7 +484,12 @@ fn test_one_writer_and_multiple_reading_threads() {
 
     // Add a writer that inserts the records
     threads.push(thread::spawn(move || {
-        let mut db = DB::<InstSingleId>::configure()
+        let mut db = DB::configure()
+            .schema(InstSingleId::schema())
+            .primary_key(InstSingleId::primary_key())
+            .secondary_keys(InstSingleId::secondary_keys())
+            .from_record(InstSingleId::from_record)
+            .into_record(InstSingleId::into_record)
             .data_dir(&data_dir)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -452,7 +519,12 @@ fn test_log_is_rotated_when_capacity_reached() {
         + (1 + 8 + 4)  // string tag + string length + string data
         + (1 + 8 + 3); // bytes tag + bytes length + bytes data
 
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .segment_size(10 * record_len) // small log segment size
         .initialize()
@@ -482,7 +554,12 @@ fn test_log_is_rotated_when_capacity_reached() {
 #[test]
 fn test_delete() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -519,7 +596,12 @@ fn test_delete() {
 #[test]
 fn test_delete_by() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -571,7 +653,12 @@ fn test_delete_by() {
 #[test]
 fn test_range_by_id() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -619,7 +706,12 @@ fn test_range_by_id() {
 #[test]
 fn test_batch_find_by() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -652,7 +744,12 @@ fn test_batch_find_by() {
 #[test]
 fn test_commit_transaction() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -685,7 +782,12 @@ fn test_commit_transaction() {
 #[test]
 fn test_rollback_transaction() {
     let data_dir = tmp_dir();
-    let mut db = DB::<Inst>::configure()
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -730,10 +832,8 @@ struct InstWithNewNullableField {
     pub maybe_str: Option<String>,
 }
 
-impl Recordable for InstWithNewNullableField {
-    type Field = FieldWithNewNullableField;
-
-    fn schema() -> Vec<(Self::Field, Type)> {
+impl InstWithNewNullableField {
+    fn schema() -> Vec<(FieldWithNewNullableField, Type)> {
         vec![
             (FieldWithNewNullableField::Id, Type::int()),
             (FieldWithNewNullableField::Name, Type::string().nullable()),
@@ -745,11 +845,11 @@ impl Recordable for InstWithNewNullableField {
         ]
     }
 
-    fn primary_key() -> Self::Field {
+    fn primary_key() -> FieldWithNewNullableField {
         FieldWithNewNullableField::Id
     }
 
-    fn secondary_keys() -> Vec<Self::Field> {
+    fn secondary_keys() -> Vec<FieldWithNewNullableField> {
         vec![FieldWithNewNullableField::Name]
     }
 
@@ -801,7 +901,12 @@ fn test_add_nullable_field() {
 
     // Insert a record with 3 fields
     {
-        let mut db = DB::<Inst>::configure()
+        let mut db = DB::configure()
+            .schema(Inst::schema())
+            .primary_key(Inst::primary_key())
+            .secondary_keys(Inst::secondary_keys())
+            .from_record(Inst::from_record)
+            .into_record(Inst::into_record)
             .data_dir(&data_dir)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -815,7 +920,12 @@ fn test_add_nullable_field() {
     }
 
     // Insert a record with 4 fields (last is nullable)
-    let mut db = DB::<InstWithNewNullableField>::configure()
+    let mut db = DB::configure()
+        .schema(InstWithNewNullableField::schema())
+        .primary_key(InstWithNewNullableField::primary_key())
+        .secondary_keys(InstWithNewNullableField::secondary_keys())
+        .from_record(InstWithNewNullableField::from_record)
+        .into_record(InstWithNewNullableField::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -844,7 +954,12 @@ fn test_add_non_nullable_field() {
 
     // Insert a record with just one field
     {
-        let mut db = DB::<InstSingleId>::configure()
+        let mut db = DB::configure()
+            .schema(InstSingleId::schema())
+            .primary_key(InstSingleId::primary_key())
+            .secondary_keys(InstSingleId::secondary_keys())
+            .from_record(InstSingleId::from_record)
+            .into_record(InstSingleId::into_record)
             .data_dir(&data_dir)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -854,7 +969,15 @@ fn test_add_non_nullable_field() {
 
     // Configure the DB with three fields, one of which is non-nullable
     // This should fail
-    match DB::<Inst>::configure().data_dir(&data_dir).initialize() {
+    match DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(&data_dir)
+        .initialize()
+    {
         Ok(_) => panic!("Expected initialization to fail"),
         Err(DBError::ValidationError(e)) => {
             // Expected
@@ -862,4 +985,43 @@ fn test_add_non_nullable_field() {
         }
         Err(e) => panic!("Unexpected error: {:?}", e),
     }
+}
+
+#[test]
+fn test_delete_by_multiple_indexes() {
+    let data_dir = tmp_dir();
+
+    let mut db = DB::configure()
+        .schema(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some identical records
+    for _ in 0..10 {
+        db.upsert(Inst {
+            id: 0,
+            name: Some("foo".to_string()),
+            data: vec![],
+        })
+        .unwrap();
+    }
+
+    // Delete by name
+    db.delete_by(&Field::Name, &Value::String("foo".to_string()))
+        .unwrap();
+
+    // Check that the records are deleted by finding by name
+    let result = db
+        .find_by(&Field::Name, &Value::String("foo".to_string()))
+        .unwrap();
+    assert_eq!(result.len(), 0);
+
+    // Double check with find by id
+    let result = db.find_by(&Field::Id, &Value::Int(0)).unwrap();
+    assert_eq!(result.len(), 0);
 }
