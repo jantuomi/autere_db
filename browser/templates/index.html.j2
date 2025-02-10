@@ -1,0 +1,28 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+<main>
+    {% include "aside.html.j2" %}
+
+    <div class="results">
+        <table>
+        <thead>
+            <tr>
+            {% for field_name in field_names %}
+                <th>{{ field_name }}</th>
+            {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+            {% for field in row %}
+                <td>{{ field }}</td>
+            {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+        </table>
+    </div>
+</main>
+{% endblock %}

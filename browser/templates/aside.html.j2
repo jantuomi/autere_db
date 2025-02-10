@@ -1,0 +1,16 @@
+{% block aside %}
+<aside>
+    <h3>Read operations</h3>
+    <ul>
+        <li><a href="/find">Find</a></li>
+        <li><a href="/range">Range</a></li>
+    </ul>
+    <h3>Write operations</h3>
+    <ul>
+        <li><a href="/upsert">Upsert</a></li>
+        <li><a href="/delete">Delete</a></li>
+    </ul>
+
+    {% include selected_form %}
+</aside>
+{% endblock %}

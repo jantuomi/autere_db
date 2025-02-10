@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preload" href="/static/InclusiveSans-Regular.ttf" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="stylesheet" href="/static/styles.css"></link>
+    {% block head_meta %}
+    <title>Database browser</title>
+    <meta name="description" content="Database browser for log_db">
+    {% endblock %}
+
+    <!-- -- https://leanrada.com/htmz/ -->
+    <iframe hidden name=htmz onload="setTimeout(()=>document.querySelector(contentWindow.location.hash||null)?.replaceWith(...contentDocument.body.childNodes))"></iframe>
+</head>
+<body>
+  <h1><a href="/">Database browser</a></h1>
+  {% block content %}{% endblock %}
+</body>
+</html>
