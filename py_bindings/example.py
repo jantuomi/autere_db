@@ -1,6 +1,6 @@
+import tempfile
 from pprint import pformat, pprint
-import log_db
-from log_db import Value, Type, Bound
+from log_db import Value, Type, Bound, DB
 
 # TODO: This should be imported from the log_db module
 # but exporting type aliases does not work automatically
@@ -27,10 +27,12 @@ class Inst:
     def __repr__(self) -> str:
         return pformat(self.__dict__)
 
+temp_dir = tempfile.TemporaryDirectory()
+
 # Create a new database
-db = log_db.DB \
+db = DB \
     .configure() \
-    .data_dir("db") \
+    .data_dir(temp_dir.name) \
     .schema([
         ("id", Type.int()),
         ("name", Type.string()),
