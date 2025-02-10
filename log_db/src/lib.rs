@@ -25,7 +25,7 @@ mod memtable_primary;
 mod memtable_secondary;
 mod record;
 
-pub use common::{DBError, DBResult, OwnedBounds, Value};
+pub use common::{DBError, DBResult, OwnedBounds, QueryParams, Value, DEFAULT_QUERY_PARAMS};
 pub use config::{ReadConsistency, Schema, WriteDurability};
 
 use common::*;
@@ -72,6 +72,7 @@ impl<T, F: Eq + Clone> DB<T, F> {
                 // TODO: This clone is only here to appease the borrow checker
                 &engine.config.primary_key.clone(),
                 std::iter::once(value),
+                &DEFAULT_QUERY_PARAMS,
             )
         })?;
 
@@ -86,7 +87,24 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// Get a collection of records based on an indexed field value.
     pub fn find_by(&mut self, field: &F, value: &Value) -> DBResult<Vec<T>> {
         let recs = self.engine.with_shared_lock(|engine| {
-            engine.batch_find_by_records(field, std::iter::once(value))
+            engine.batch_find_by_records(field, std::iter::once(value), &DEFAULT_QUERY_PARAMS)
+        })?;
+
+        Ok(recs
+            .into_iter()
+            .map(|(_, rec)| (self.engine.config.from_record)(rec.values))
+            .collect())
+    }
+
+    /// Get a collection of records based on an indexed field value, with additional parameters.
+    pub fn find_by_with_params(
+        &mut self,
+        field: &F,
+        value: &Value,
+        params: &QueryParams,
+    ) -> DBResult<Vec<T>> {
+        let recs = self.engine.with_shared_lock(|engine| {
+            engine.batch_find_by_records(field, std::iter::once(value), params)
         })?;
 
         Ok(recs
@@ -99,9 +117,28 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// Returns a vector of pairs where the first value is an index into the given sequence of values,
     /// and the second value is the record.
     pub fn batch_find_by(&mut self, field: &F, values: &[Value]) -> DBResult<Vec<(usize, T)>> {
-        let recs = self
-            .engine
-            .with_shared_lock(|engine| engine.batch_find_by_records(field, values.iter()))?;
+        let recs = self.engine.with_shared_lock(|engine| {
+            engine.batch_find_by_records(field, values.iter(), &DEFAULT_QUERY_PARAMS)
+        })?;
+
+        Ok(recs
+            .into_iter()
+            .map(|(tag, rec)| (tag, (self.engine.config.from_record)(rec.values)))
+            .collect())
+    }
+
+    /// Get a collection of records based on a sequence of indexed field values, with additional parameters.
+    /// Returns a vector of pairs where the first value is an index into the given sequence of values,
+    /// and the second value is the record.
+    pub fn batch_find_by_with_params(
+        &mut self,
+        field: &F,
+        values: &[Value],
+        params: &QueryParams,
+    ) -> DBResult<Vec<(usize, T)>> {
+        let recs = self.engine.with_shared_lock(|engine| {
+            engine.batch_find_by_records(field, values.iter(), params)
+        })?;
 
         Ok(recs
             .into_iter()
@@ -113,9 +150,28 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// This method can be used to run comparison-like queries, e.g. `field >= 10`
     /// could be expressed as `db.range_by(Field::Id, 10..)`.
     pub fn range_by<B: RangeBounds<Value>>(&mut self, field: &F, range: B) -> DBResult<Vec<T>> {
+        let recs = self.engine.with_shared_lock(|engine| {
+            engine.range_by_records(field, range, &DEFAULT_QUERY_PARAMS)
+        })?;
+
+        Ok(recs
+            .into_iter()
+            .map(|rec| (self.engine.config.from_record)(rec.values))
+            .collect())
+    }
+
+    /// Get a collection of records based on a range of indexed field values, with additional parameters.
+    /// This method can be used to run comparison-like queries, e.g. `field >= 10`
+    /// could be expressed as `db.range_by(Field::Id, 10..)`.
+    pub fn range_by_with_params<B: RangeBounds<Value>>(
+        &mut self,
+        field: &F,
+        range: B,
+        params: &QueryParams,
+    ) -> DBResult<Vec<T>> {
         let recs = self
             .engine
-            .with_shared_lock(|engine| engine.range_by_records(field, range))?;
+            .with_shared_lock(|engine| engine.range_by_records(field, range, params))?;
 
         Ok(recs
             .into_iter()

@@ -562,3 +562,14 @@ impl<T> RangeBounds<T> for OwnedBounds<T> {
         self.end.as_ref()
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct QueryParams {
+    pub offset: usize,
+    pub limit: usize,
+}
+
+pub static DEFAULT_QUERY_PARAMS: QueryParams = QueryParams {
+    offset: 0,
+    limit: usize::MAX,
+};

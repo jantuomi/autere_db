@@ -865,3 +865,129 @@ fn test_delete_by_multiple_indexes() {
     let result = db.find_by(&Field::Id, &Value::Int(0)).unwrap();
     assert_eq!(result.len(), 0);
 }
+
+#[test]
+fn test_find_by_with_offset_and_limit() {
+    let data_dir = tmp_dir();
+
+    let mut db = DB::configure()
+        .fields(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some records
+    for i in 0..10 {
+        db.upsert(Inst {
+            id: i,
+            name: Some("foo".to_string()),
+            data: vec![],
+        })
+        .unwrap();
+    }
+
+    // Find by name with offset and limit
+    let result = db
+        .find_by_with_params(
+            &Field::Name,
+            &Value::String("foo".to_string()),
+            &QueryParams {
+                offset: 2,
+                limit: 3,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].id, 2);
+    assert_eq!(result[1].id, 3);
+    assert_eq!(result[2].id, 4);
+}
+
+#[test]
+fn test_batch_find_by_with_offset_and_limit() {
+    let data_dir = tmp_dir();
+
+    let mut db = DB::configure()
+        .fields(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some records
+    for i in 0..10 {
+        db.upsert(Inst {
+            id: i,
+            name: Some("foo".to_string()),
+            data: vec![],
+        })
+        .unwrap();
+    }
+
+    // Batch find by id with offset and limit
+    let batch: Vec<Value> = (2..5).map(Value::Int).collect();
+    let result = db
+        .batch_find_by_with_params(
+            &Field::Id,
+            &batch,
+            &QueryParams {
+                offset: 1,
+                limit: 2,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].1.id, 3);
+    assert_eq!(result[1].1.id, 4);
+}
+
+#[test]
+fn test_range_by_with_offset_and_limit() {
+    let data_dir = tmp_dir();
+
+    let mut db = DB::configure()
+        .fields(Inst::schema())
+        .primary_key(Inst::primary_key())
+        .secondary_keys(Inst::secondary_keys())
+        .from_record(Inst::from_record)
+        .into_record(Inst::into_record)
+        .data_dir(&data_dir)
+        .initialize()
+        .expect("Failed to initialize DB instance");
+
+    // Insert some records
+    for i in 0..10 {
+        db.upsert(Inst {
+            id: i,
+            name: Some("foo".to_string()),
+            data: vec![],
+        })
+        .unwrap();
+    }
+
+    // Range by id with offset and limit
+    let result = db
+        .range_by_with_params(
+            &Field::Id,
+            &Value::Int(2)..&Value::Int(8),
+            &QueryParams {
+                offset: 1,
+                limit: 3,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].id, 3);
+    assert_eq!(result[1].id, 4);
+    assert_eq!(result[2].id, 5);
+}

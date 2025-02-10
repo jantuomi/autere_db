@@ -249,6 +249,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         &mut self,
         field: &F,
         values: impl Iterator<Item = &'a Value>,
+        params: &QueryParams,
     ) -> DBResult<Vec<(usize, Record)>> {
         let indexables = values
             .map(|value| {
@@ -305,7 +306,10 @@ impl<T, F: Eq + Clone> Engine<T, F> {
             tagged.extend(mapped);
         }
 
-        let tagged_records = self.read_tagged_log_keys(tagged.into_iter())?;
+        let bound_low = params.offset;
+        let bound_high = (params.offset + params.limit).min(tagged.len());
+        let sliced = &tagged[bound_low..bound_high];
+        let tagged_records = self.read_tagged_log_keys(sliced.into_iter())?;
 
         debug!("Read {} records", tagged_records.len());
 
@@ -316,7 +320,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
     /// The log keys are accompanied by an integer tag that can be used to identify and group them later.
     fn read_tagged_log_keys<'a>(
         &self,
-        log_keys: impl Iterator<Item = (usize, &'a LogKey)>,
+        log_keys: impl Iterator<Item = &'a (usize, &'a LogKey)>,
     ) -> DBResult<Vec<(usize, Record)>> {
         let mut records = vec![];
         let mut log_keys_map = BTreeMap::new();
@@ -363,7 +367,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
                 data_file.read_exact(&mut data_buf)?;
 
                 let record = Record::deserialize(&data_buf);
-                records.push((tag, record));
+                records.push((*tag, record));
 
                 current_metadata_offset = new_metadata_offset + row_length;
             }
@@ -376,6 +380,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         &mut self,
         field: &F,
         range: B,
+        params: &QueryParams,
     ) -> DBResult<Vec<Record>> {
         fn range_bound_to_indexable(bound: Bound<&Value>) -> DBResult<Bound<IndexableValue>> {
             match bound {
@@ -415,9 +420,13 @@ impl<T, F: Eq + Clone> Engine<T, F> {
             self.secondary_memtables[index].range(indexable_bounds)
         };
 
-        let log_key_batches = log_keys.into_iter().map(|log_key| (0, log_key));
+        let log_key_batches: Vec<(usize, &LogKey)> =
+            log_keys.into_iter().map(|log_key| (0, log_key)).collect();
 
-        let tagged_records = self.read_tagged_log_keys(log_key_batches);
+        let bound_low = params.offset;
+        let bound_high = (params.offset + params.limit).min(log_key_batches.len());
+        let sliced = &log_key_batches[bound_low..bound_high];
+        let tagged_records = self.read_tagged_log_keys(sliced.into_iter());
 
         Ok(tagged_records?.into_iter().map(|(_, rec)| rec).collect())
     }
@@ -451,7 +460,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
 
     pub fn delete_by_field(&mut self, field: &F, value: &Value) -> DBResult<Vec<Record>> {
         let recs: Vec<Record> = self
-            .batch_find_by_records(field, std::iter::once(value))?
+            .batch_find_by_records(field, std::iter::once(value), &DEFAULT_QUERY_PARAMS)?
             .into_iter()
             .map(|(_, mut rec)| {
                 rec.tombstone = true;
