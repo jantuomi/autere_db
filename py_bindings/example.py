@@ -1,6 +1,6 @@
 import tempfile
 from pprint import pformat, pprint
-from log_db import Value, Type, Bound, DB
+from log_db import Value, Bound, DB
 
 # TODO: This should be imported from the log_db module
 # but exporting type aliases does not work automatically
@@ -33,10 +33,7 @@ temp_dir = tempfile.TemporaryDirectory()
 db = DB \
     .configure() \
     .data_dir(temp_dir.name) \
-    .schema([
-        ("id", Type.int()),
-        ("name", Type.string()),
-    ]) \
+    .fields(["id", "name"]) \
     .primary_key("id") \
     .secondary_keys(["name"]) \
     .initialize()

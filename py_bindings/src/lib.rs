@@ -374,6 +374,20 @@ impl DB {
             .map_err(|e| PyException::new_err(e.to_string()))?;
         Ok(())
     }
+
+    pub fn do_maintenance_tasks(&mut self) -> PyResult<()> {
+        self.db
+            .do_maintenance_tasks()
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn refresh_indexes(&mut self) -> PyResult<()> {
+        self.db
+            .refresh_indexes()
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[pyclass(name = "Bound", eq)]
