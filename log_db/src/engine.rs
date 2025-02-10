@@ -68,7 +68,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         let primary_key_index = config
             .schema
             .iter()
-            .position(|(field, _)| field == &config.primary_key)
+            .position(|field| field == &config.primary_key)
             .ok_or(DBError::ValidationError(
                 "Primary key not found in schema after initialize".to_owned(),
             ))?;
@@ -80,14 +80,9 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         // If any of the keys is not in the schema or
         // is not an IndexableValue, return an error
         for &key in &all_keys {
-            let (_, value_type) = config.schema.iter().find(|(field, _)| field == key).ok_or(
+            let _ = config.schema.iter().find(|&field| field == key).ok_or(
                 DBError::ValidationError("Key must be present in the field schema".to_owned()),
             )?;
-
-            match value_type.primitive {
-                PrimitiveType::Int | PrimitiveType::String => {}
-                _ => return Err(DBError::ValidationError("Key must be indexable".to_owned())),
-            }
         }
         let primary_memtable = PrimaryMemtable::new();
         let secondary_memtables = config
@@ -163,9 +158,6 @@ impl<T, F: Eq + Clone> Engine<T, F> {
             for ForwardLogReaderItem { record, index } in
                 ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
             {
-                // Validate that the values in the record are compatible with the schema
-                record.validate(&self.config.schema)?;
-
                 let log_key = LogKey::new(segnum, index);
 
                 if record.tombstone {
@@ -200,7 +192,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
                 .config
                 .schema
                 .iter()
-                .position(|(f, _)| sk_field == f)
+                .position(|f| sk_field == f)
                 .unwrap();
             let sk = record.at(sk_field_index).as_indexable().unwrap();
 
@@ -221,7 +213,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
                     .config
                     .schema
                     .iter()
-                    .position(|(f, _)| sk_field == f)
+                    .position(|f| sk_field == f)
                     .unwrap();
                 let sk = record.at(sk_field_index).as_indexable().unwrap();
 
@@ -258,22 +250,11 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         field: &F,
         values: impl Iterator<Item = &'a Value>,
     ) -> DBResult<Vec<(usize, Record)>> {
-        let field_type = self.get_field_type(field).ok_or(DBError::ValidationError(
-            "Field not found in schema".to_owned(),
-        ))?;
-
         let indexables = values
             .map(|value| {
-                if type_check(&value, &field_type) {
-                    value.as_indexable().ok_or(DBError::ValidationError(
-                        "Queried value must be indexable".to_owned(),
-                    ))
-                } else {
-                    Err(DBError::ValidationError(format!(
-                        "Queried value {:?} does not match key type: {:?}",
-                        value, field_type
-                    )))
-                }
+                value.as_indexable().ok_or(DBError::ValidationError(
+                    "Queried value must be indexable".to_owned(),
+                ))
             })
             .collect::<DBResult<Vec<IndexableValue>>>()?;
 
@@ -396,35 +377,26 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         field: &F,
         range: B,
     ) -> DBResult<Vec<Record>> {
-        fn range_bound_to_indexable(
-            bound: Bound<&Value>,
-            field_type: &Type,
-        ) -> DBResult<Bound<IndexableValue>> {
-            fn convert(value: &Value, field_type: &Type) -> DBResult<IndexableValue> {
-                if !type_check(&value, field_type) {
-                    return Err(DBError::ValidationError(format!(
-                        "Queried value does not match type: {:?}",
-                        field_type
-                    )));
-                }
-                value.as_indexable().ok_or(DBError::ValidationError(
-                    "Queried value must be indexable".to_owned(),
-                ))
-            }
-
+        fn range_bound_to_indexable(bound: Bound<&Value>) -> DBResult<Bound<IndexableValue>> {
             match bound {
-                Bound::Included(value) => convert(value, field_type).map(Bound::Included),
-                Bound::Excluded(value) => convert(value, field_type).map(Bound::Excluded),
+                Bound::Included(value) => value
+                    .as_indexable()
+                    .ok_or(DBError::ValidationError(
+                        "Queried value must be indexable".to_owned(),
+                    ))
+                    .map(Bound::Included),
+                Bound::Excluded(value) => value
+                    .as_indexable()
+                    .ok_or(DBError::ValidationError(
+                        "Queried value must be indexable".to_owned(),
+                    ))
+                    .map(Bound::Excluded),
                 Bound::Unbounded => Ok(Bound::Unbounded),
             }
         }
 
-        let field_type = self.get_field_type(field).ok_or(DBError::ValidationError(
-            "Field not found in schema".to_owned(),
-        ))?;
-
-        let start_indexable = range_bound_to_indexable(range.start_bound(), field_type)?;
-        let end_indexable = range_bound_to_indexable(range.end_bound(), field_type)?;
+        let start_indexable = range_bound_to_indexable(range.start_bound())?;
+        let end_indexable = range_bound_to_indexable(range.end_bound())?;
 
         let indexable_bounds = OwnedBounds::new(start_indexable, end_indexable);
 
@@ -706,15 +678,6 @@ impl<T, F: Eq + Clone> Engine<T, F> {
     }
 
     #[inline]
-    fn get_field_type(&self, field: &F) -> Option<&Type> {
-        self.config
-            .schema
-            .iter()
-            .find(|(f, _)| f == field)
-            .map(|(_, t)| t)
-    }
-
-    #[inline]
     pub fn with_exclusive_lock<A>(
         &mut self,
         f: impl FnOnce(&mut Self) -> DBResult<A>,
@@ -801,10 +764,7 @@ mod tests {
 
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .schema(vec![
-                (Field::Id, Type::int()),
-                (Field::Name, Type::string()),
-            ])
+            .fields(vec![Field::Id, Field::Name])
             .primary_key(Field::Id)
             .secondary_keys(vec![Field::Name])
             .from_record(TestInst2::from_record)

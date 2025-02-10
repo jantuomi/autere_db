@@ -17,7 +17,7 @@ LogDB does not support:
 
 - Authentication or authorization in any capacity
 - Multiple tables
-- Schema evolution, other than adding new nullable fields
+- Type checking or schema evolution. These are outsourced to the application layer.
 
 See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation of LogDB.
 
@@ -58,30 +58,7 @@ struct Inst {
     pub name: Option<String>,
 }
 
-// Implement the `Recordable` trait for your data type
-impl Recordable for Inst {
-  // Use the `Field` enum
-  type Field = Field;
-
-  // Define the schema as a vector of field names and corresponding types
-  fn schema() -> Vec<(Self::Field, Type)> {
-    vec![
-      (Field::Id, Type::int()),
-      (Field::Name, Type::string().nullable()),
-    ]
-  }
-
-  // Select the primary key field
-  fn primary_key() -> Self::Field {
-    Field::Id
-  }
-
-  // Select the secondary key fields. All queries must be
-  // based on the primary key or secondary keys.
-  fn secondary_keys() -> Vec<Self::Field> {
-    vec![Field::Name]
-  }
-
+impl Inst {
   // Describe how to convert the data type to a vector of `Value`s
   fn into_record(self) -> Vec<Value> {
     vec![
@@ -96,8 +73,7 @@ impl Recordable for Inst {
   // Similarly, describe how to convert a vector of database values to the data type
   fn from_record(record: Vec<Value>) -> Self {
     let mut it = record.into_iter();
-
-    Inst {
+    let inst = Inst {
       id: match it.next().unwrap() {
         Value::Int(id) => id,
         other => panic!("Invalid value type: {:?}", other),
@@ -107,14 +83,34 @@ impl Recordable for Inst {
         Value::Null => None,
         other => panic!("Invalid value type: {:?}", other),
       },
-    }
+    };
+
+    assert_eq!(it.next(), None);
+    inst
   }
 }
 
-fn main() {
+fn example() -> DBResult<()> {
   // Initialize the database
-  let mut db = DB::<Inst>::configure()
+  let mut db = DB::configure()
+    // Set the directory where the database files are stored.
     .data_dir("data")
+
+    // Select the database fields, i.e. columns.
+    .fields(vec![Field::Id, Field::Name])
+
+    // Select the primary key field.
+    .primary_key(Field::Id)
+
+    // Select the secondary key fields. All queries must be
+    // based on the primary key or secondary keys.
+    .secondary_keys(vec![Field::Name])
+
+    // Define the conversion functions between the data type and database values.
+    .from_record(Inst::from_record)
+    .into_record(Inst::into_record)
+
+    // Finish the builder pattern and initialize the database.
     .initialize()?;
 
   // Insert or update the record based on the primary key
@@ -124,7 +120,7 @@ fn main() {
   })?;
 
   // Get the record by primary key
-  let found = db.get(Value::Int(1))?;
+  let found = db.get(&Value::Int(1))?;
 
   ...
 }
@@ -160,14 +156,16 @@ maturin build --release     # for the release version
 Then you can use the Python bindings like so:
 
 ```python
-from log_db_py import DB, Value, ValueType, Record
+from log_db_py import DB, Value, Record
 
-config = DB.configure();
-config.primary_key = "id"
-config.fields = [("id", ValueType.int().nullable())]
+config = DB.configure() \
+    .data_dir("data") \
+    .fields(["id", "name"]) \
+    .primary_key("id") \
+    .secondary_keys(["name"]) \
+    .initialize()
 
-db = config.initialize()
-db.upsert(Record(Value.int(10)))
+db.upsert([Value.int(10)])
 ```
 
 ## Copyright and license

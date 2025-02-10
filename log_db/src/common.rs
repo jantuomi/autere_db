@@ -183,58 +183,6 @@ pub enum IndexableValue {
     String(String),
 }
 
-/// A primitive type
-#[derive(Debug, Clone)]
-pub enum PrimitiveType {
-    Int,
-    Decimal,
-    String,
-    Bytes,
-}
-
-/// A primitive type + a nullability bit
-#[derive(Debug, Clone)]
-pub struct Type {
-    pub primitive: PrimitiveType,
-    pub nullable: bool,
-}
-
-impl Type {
-    pub fn int() -> Self {
-        Type {
-            primitive: PrimitiveType::Int,
-            nullable: false,
-        }
-    }
-
-    pub fn decimal() -> Self {
-        Type {
-            primitive: PrimitiveType::Decimal,
-            nullable: false,
-        }
-    }
-
-    pub fn string() -> Self {
-        Type {
-            primitive: PrimitiveType::String,
-            nullable: false,
-        }
-    }
-
-    pub fn bytes() -> Self {
-        Type {
-            primitive: PrimitiveType::Bytes,
-            nullable: false,
-        }
-    }
-
-    pub fn nullable(&mut self) -> Self {
-        let mut new = self.clone();
-        new.nullable = true;
-        new
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum Value {
     Null,
@@ -338,41 +286,6 @@ impl Value {
             Value::String(s) => Some(IndexableValue::String(s.clone())),
             _ => None,
         }
-    }
-}
-
-pub fn type_check(value: &Value, value_type: &Type) -> bool {
-    match (value, value_type) {
-        (
-            Value::Int(_),
-            Type {
-                primitive: PrimitiveType::Int,
-                ..
-            },
-        ) => true,
-        (
-            Value::Decimal(_),
-            Type {
-                primitive: PrimitiveType::Decimal,
-                ..
-            },
-        ) => true,
-        (
-            Value::Bytes(_),
-            Type {
-                primitive: PrimitiveType::Bytes,
-                ..
-            },
-        ) => true,
-        (
-            Value::String(_),
-            Type {
-                primitive: PrimitiveType::String,
-                ..
-            },
-        ) => true,
-        (Value::Null, Type { nullable: true, .. }) => true,
-        _ => false,
     }
 }
 

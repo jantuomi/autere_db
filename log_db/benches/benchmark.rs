@@ -15,7 +15,7 @@ pub fn upsert_compacted(c: &mut Criterion) {
         .to_str()
         .expect("Failed to convert tmpdir path to str");
     let mut db = DB::configure()
-        .schema(Inst::schema())
+        .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
         .from_record(Inst::from_record)
@@ -47,7 +47,7 @@ pub fn delete_existing_compacted(c: &mut Criterion) {
         .to_str()
         .expect("Failed to convert tmpdir path to str");
     let mut db = DB::configure()
-        .schema(Inst::schema())
+        .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
         .from_record(Inst::from_record)
@@ -86,7 +86,7 @@ pub fn upsert_write_durability(c: &mut Criterion) {
                 .to_str()
                 .expect("Failed to convert tmpdir path to str");
             let mut db = DB::configure()
-                .schema(Inst::schema())
+                .fields(Inst::fields())
                 .primary_key(Inst::primary_key())
                 .secondary_keys(Inst::secondary_keys())
                 .from_record(Inst::from_record)
@@ -114,7 +114,7 @@ pub fn get_existing_compacted(c: &mut Criterion) {
         .to_str()
         .expect("Failed to convert tmpdir path to str");
     let mut db = DB::configure()
-        .schema(Inst::schema())
+        .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
         .from_record(Inst::from_record)
@@ -150,7 +150,7 @@ pub fn find_by_existing_compacted(c: &mut Criterion) {
         .to_str()
         .expect("Failed to convert tmpdir path to str");
     let mut db = DB::configure()
-        .schema(Inst::schema())
+        .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
         .from_record(Inst::from_record)

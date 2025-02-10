@@ -9,49 +9,6 @@ use std::ops::Bound as StdBound;
 type PyRecord = Vec<Value>;
 type PyField = String;
 
-#[pyclass]
-#[derive(Clone)]
-struct Type {
-    typ: log_db::Type,
-}
-
-#[pymethods]
-impl Type {
-    #[staticmethod]
-    fn int() -> Self {
-        Type {
-            typ: log_db::Type::int(),
-        }
-    }
-
-    #[staticmethod]
-    fn decimal() -> Self {
-        Type {
-            typ: log_db::Type::decimal(),
-        }
-    }
-
-    #[staticmethod]
-    fn string() -> Self {
-        Type {
-            typ: log_db::Type::string(),
-        }
-    }
-
-    #[staticmethod]
-    fn bytes() -> Self {
-        Type {
-            typ: log_db::Type::bytes(),
-        }
-    }
-
-    fn nullable(&self) -> Self {
-        Type {
-            typ: self.typ.clone().nullable(),
-        }
-    }
-}
-
 pub const WRITE_DURABILITY_FLUSH: u8 = 0;
 pub const WRITE_DURABILITY_FLUSH_SYNC: u8 = 1;
 
@@ -64,7 +21,7 @@ struct Config {
     segment_size: Option<usize>,
     write_durability: Option<log_db::WriteDurability>,
     read_consistency: Option<log_db::ReadConsistency>,
-    schema: Option<Vec<(PyField, Type)>>,
+    fields: Option<Vec<PyField>>,
     primary_key: Option<PyField>,
     secondary_keys: Option<Vec<PyField>>,
 }
@@ -121,11 +78,11 @@ impl Config {
         Ok(slf)
     }
 
-    pub fn schema<'a>(
+    pub fn fields<'a>(
         mut slf: PyRefMut<'a, Self>,
-        schema: Vec<(PyField, Type)>,
+        fields: Vec<PyField>,
     ) -> PyResult<PyRefMut<'a, Self>> {
-        slf.schema = Some(schema);
+        slf.fields = Some(fields);
         Ok(slf)
     }
 
@@ -161,15 +118,15 @@ impl Config {
             let tmp = self.read_consistency.as_ref().unwrap();
             config = config.read_consistency(tmp.clone());
         }
-        if self.schema.is_some() {
-            let schema = self
-                .schema
+        if self.fields.is_some() {
+            let fields = self
+                .fields
                 .as_ref()
                 .unwrap()
                 .iter()
-                .map(|(name, typ)| (name.clone(), typ.typ.clone()))
+                .map(|name| name.clone())
                 .collect();
-            config = config.schema(schema);
+            config = config.fields(fields);
         }
         if self.primary_key.is_some() {
             config = config.primary_key(self.primary_key.as_ref().unwrap().to_string());
@@ -323,7 +280,7 @@ impl DB {
             segment_size: None,
             write_durability: None,
             read_consistency: None,
-            schema: None,
+            fields: None,
             primary_key: None,
             secondary_keys: None,
         }
@@ -448,7 +405,6 @@ impl PyRangeBound {
 #[pymodule(name = "log_db")]
 fn log_db_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DB>()?;
-    m.add_class::<Type>()?;
     m.add_class::<Value>()?;
     m.add_class::<PyRangeBound>()?;
 

@@ -25,7 +25,7 @@ mod memtable_primary;
 mod memtable_secondary;
 mod record;
 
-pub use common::{DBError, DBResult, OwnedBounds, Type, Value};
+pub use common::{DBError, DBResult, OwnedBounds, Value};
 pub use config::{ReadConsistency, Schema, WriteDurability};
 
 use common::*;
@@ -57,9 +57,6 @@ impl<T, F: Eq + Clone> DB<T, F> {
     pub fn upsert(&mut self, recordable: T) -> DBResult<()> {
         let record = Record::from(&(self.engine.config.into_record)(recordable));
         debug!("Upserting record: {:?}", record);
-
-        record.validate(&self.engine.config.schema)?;
-        debug!("Record is valid");
 
         self.engine
             .with_exclusive_lock(move |engine| engine.upsert_record(record))?;
@@ -297,7 +294,7 @@ mod tests {
 
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .schema(vec![(Field::Id, Type::int())])
+            .fields(vec![Field::Id])
             .primary_key(Field::Id)
             .from_record(TestInst1::from_record)
             .into_record(TestInst1::into_record)
@@ -384,7 +381,7 @@ mod tests {
 
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .schema(vec![(Field::Id, Type::int())])
+            .fields(vec![Field::Id])
             .primary_key(Field::Id)
             .from_record(TestInst1::from_record)
             .into_record(TestInst1::into_record)
@@ -438,10 +435,7 @@ mod tests {
 
         let mut db = DB::configure()
             .data_dir(data_dir.to_str().unwrap())
-            .schema(vec![
-                (Field::Id, Type::int()),
-                (Field::Name, Type::string()),
-            ])
+            .fields(vec![Field::Id, Field::Name])
             .primary_key(Field::Id)
             .secondary_keys(vec![Field::Name])
             .from_record(TestInst2::from_record)

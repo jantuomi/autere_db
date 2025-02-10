@@ -1,7 +1,7 @@
 use super::*;
 
 pub struct Schema<F> {
-    pub fields: Vec<(F, Type)>,
+    pub fields: Vec<F>,
     pub primary_key: F,
     pub secondary_keys: Vec<F>,
 }
@@ -12,7 +12,7 @@ pub struct ConfigBuilder<T, F> {
     write_durability: Option<WriteDurability>,
     read_consistency: Option<ReadConsistency>,
 
-    schema: Option<Vec<(F, Type)>>,
+    fields: Option<Vec<F>>,
     primary_key: Option<F>,
     secondary_keys: Option<Vec<F>>,
     from_record: Option<fn(Vec<Value>) -> T>,
@@ -29,7 +29,7 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
             write_durability: None,
             read_consistency: None,
 
-            schema: None,
+            fields: None,
             primary_key: None,
             secondary_keys: None,
             from_record: None,
@@ -71,8 +71,8 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
         self
     }
 
-    pub fn schema(mut self, schema: Vec<(F, Type)>) -> Self {
-        self.schema = Some(schema);
+    pub fn fields(mut self, schema: Vec<F>) -> Self {
+        self.fields = Some(schema);
         self
     }
 
@@ -98,7 +98,7 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
 
     pub fn initialize(self) -> DBResult<DB<T, F>> {
         let schema = self
-            .schema
+            .fields
             .ok_or_else(|| DBError::ValidationError("Schema not set".to_string()))?;
         let primary_key = self
             .primary_key
@@ -135,7 +135,7 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
 
 #[derive(Clone)]
 pub struct Config<T, F> {
-    pub schema: Vec<(F, Type)>,
+    pub schema: Vec<F>,
     pub primary_key: F,
     pub secondary_keys: Vec<F>,
     pub from_record: fn(Vec<Value>) -> T,

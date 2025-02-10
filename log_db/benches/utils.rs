@@ -18,12 +18,8 @@ pub struct Inst {
 }
 
 impl Inst {
-    pub fn schema() -> Vec<(Field, Type)> {
-        vec![
-            (Field::Id, Type::int()),
-            (Field::Name, Type::string()),
-            (Field::Data, Type::bytes()),
-        ]
+    pub fn fields() -> Vec<Field> {
+        vec![Field::Id, Field::Name, Field::Data]
     }
     pub fn primary_key() -> Field {
         Field::Id
