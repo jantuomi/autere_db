@@ -808,7 +808,7 @@ fn test_rollback_transaction() {
     })
     .unwrap();
 
-    db.tx_rollback().expect("Failed to rollback transaction");
+    db.tx_rollback().expect("Failed to roll back transaction");
 
     let johns = db
         .find_by(&Field::Name, &Value::String("John".to_string()))

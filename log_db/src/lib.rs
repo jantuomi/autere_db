@@ -3,9 +3,7 @@ extern crate log;
 
 use once_cell::sync::Lazy;
 use rust_decimal::Decimal;
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs::{self, metadata, File};
@@ -215,7 +213,7 @@ impl<T, F: Eq + Clone> DB<T, F> {
     pub fn tx_rollback(&mut self) -> DBResult<()> {
         if !self.engine.tx_active {
             return Err(DBError::TransactionError(
-                "No active transaction to rollback".to_string(),
+                "No active transaction to roll back".to_string(),
             ));
         }
 
@@ -230,7 +228,6 @@ impl<T, F: Eq + Clone> DB<T, F> {
 mod tests {
     use ctor::ctor;
     use env_logger;
-    use std::collections::HashSet;
 
     use super::*;
 
@@ -292,7 +289,6 @@ mod tests {
 
     #[test]
     fn test_compaction() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
@@ -383,7 +379,6 @@ mod tests {
 
     #[test]
     fn test_repair() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
@@ -438,7 +433,6 @@ mod tests {
 
     #[test]
     fn test_memtables_updated_on_write() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path();
 
@@ -461,8 +455,10 @@ mod tests {
             None
         );
         assert_eq!(
-            db.engine.secondary_memtables[0].find_by(&IndexableValue::String("John".to_string())),
-            &HashSet::new()
+            db.engine.secondary_memtables[0]
+                .find_by(&IndexableValue::String("John".to_string()))
+                .len(),
+            0
         );
 
         // Insert record
@@ -474,15 +470,15 @@ mod tests {
 
         // Check that the key is now indexed
         let expected_log_key = LogKey::new(1, 0);
+        let expected_pk = IndexableValue::Int(0);
         assert_eq!(
-            db.engine.primary_memtable.get(&IndexableValue::Int(0)),
+            db.engine.primary_memtable.get(&expected_pk),
             Some(&expected_log_key)
         );
-        let mut expected_set: HashSet<LogKey> = HashSet::new();
-        expected_set.insert(expected_log_key);
-        assert_eq!(
-            db.engine.secondary_memtables[0].find_by(&IndexableValue::String("John".to_string())),
-            &expected_set,
-        );
+        let expected_vals = vec![&expected_log_key];
+        let actual_vals = db.engine.secondary_memtables[0]
+            .find_by(&IndexableValue::String("John".to_string()))
+            .collect::<Vec<&LogKey>>();
+        assert_eq!(actual_vals, expected_vals);
     }
 }

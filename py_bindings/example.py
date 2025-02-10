@@ -39,7 +39,7 @@ db = log_db.DB \
     .secondary_keys(["name"]) \
     .initialize()
 
-#db.upsert(Inst(1, "foo").into_record())
+db.upsert(Inst(1, "foo").into_record())
 
 #res = db.find_by("name", log_db.Value.string("foo"))
 #insts = [Inst.from_record(r) for r in res]
@@ -49,21 +49,34 @@ res = db.range_by("name",
 )
 # insts = [Inst.from_record(r) for r in res]
 
-print("before delete:")
 res = db.find_by("name", Value.string("foo"))
-print(len(res))
+print("before delete count:", len(res))
 
 res = db.delete_by("name", Value.string("foo"))
 #res = db.delete_by("id", Value.int(1))
 
-print("deleted:")
+print("deleted instances:")
 for r in res:
     pprint(Inst.from_record(r))
 
-print("find name after delete:")
 res = db.find_by("name", Value.string("foo"))
-print(len(res))
+print("find name after delete count:", len(res))
 
-print("find id after delete:")
 res = db.find_by("id", Value.int(1))
-print(len(res))
+print(f"find id after delete count: {len(res)}")
+
+res = db.delete_by("name", Value.string("bar"))
+
+db.tx_begin()
+db.upsert(Inst(2, "bar").into_record())
+db.tx_rollback()
+
+res = db.find_by("name", Value.string("bar"))
+print("find name after rollback count:", len(res))
+
+db.tx_begin()
+db.upsert(Inst(2, "bar").into_record())
+db.tx_commit()
+
+res = db.find_by("name", Value.string("bar"))
+print("find name after commit count:", len(res))

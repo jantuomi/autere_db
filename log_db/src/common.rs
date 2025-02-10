@@ -1,5 +1,6 @@
 use super::*;
 
+use std::collections::btree_map::Values;
 // For Unix-like systems
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -48,10 +49,10 @@ pub enum DBError {
 }
 
 #[derive(Debug, Error)]
-pub enum LogKeySetError {
-    #[error("log key not found in set")]
+pub enum LogKeyMapError {
+    #[error("log key not found in map")]
     NotFoundError,
-    #[error("attempted to remove last element of non-empty set")]
+    #[error("attempted to remove last element of non-empty map")]
     RemovingLastElementError,
 }
 
@@ -76,74 +77,59 @@ impl LogKey {
     }
 }
 
-/// LogKeySet is a non-empty set of LogKeys.
+/// LogKeyMap is a non-empty map of PK => LogKey mappings.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct LogKeySet {
-    set: HashSet<LogKey>,
+pub struct LogKeyMap {
+    map: BTreeMap<IndexableValue, LogKey>,
 }
 
-impl PartialOrd for LogKeySet {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let self_max_elem = self.set.iter().max()?;
-        let other_max_elem = other.set.iter().max()?;
-        Some(self_max_elem.cmp(other_max_elem))
-    }
-}
-
-impl LogKeySet {
-    /// Create a new LogKeySet with an initial LogKey.
-    /// The initial LogKey is required since LogKeySet must be non-empty.
-    pub fn new_with_initial(key: LogKey) -> Self {
-        let mut set = HashSet::new();
-        set.insert(key);
-        LogKeySet { set }
+impl LogKeyMap {
+    /// Create a new LogKeyMap with an initial mapping.
+    /// The initial mapping is required since LogKeyMap must be non-empty.
+    pub fn new_with_initial(pk: IndexableValue, log_key: LogKey) -> Self {
+        let mut map = BTreeMap::new();
+        map.insert(pk, log_key);
+        LogKeyMap { map }
     }
 
-    pub fn contains(&self, key: &LogKey) -> bool {
-        self.set.contains(key)
+    pub fn contains_pk(&self, key: &IndexableValue) -> bool {
+        self.map.contains_key(key)
     }
 
-    /// The number of LogKeys in the set.
+    /// The number of LogKeys in the map.
     pub fn len(&self) -> usize {
-        self.set.len()
+        self.map.len()
     }
 
-    /// Insert a LogKey into the set.
-    pub fn insert(&mut self, key: LogKey) {
-        self.set.insert(key);
+    /// Insert a PK -> LogKey mapping into the map.
+    pub fn insert(&mut self, key: IndexableValue, log_key: LogKey) {
+        self.map.insert(key, log_key);
     }
 
-    /// Remove a LogKey from the set. Return Ok(()) if the key was found and removed.
-    /// Return `LogKeySetError::RemovingLastElementError` if trying to remove the last element.
-    /// Return `LogKeySetError::NotFoundError` if the key was not found.
-    pub fn remove(&mut self, key: &LogKey) -> Result<(), LogKeySetError> {
-        if self.set.len() == 1 {
-            return Err(LogKeySetError::RemovingLastElementError);
+    /// Remove a mapping from the map. Return Ok(()) if the key was found and removed.
+    /// Return `LogKeyMapError::RemovingLastElementError` if trying to remove the last element.
+    /// Return `LogKeyMapError::NotFoundError` if the key was not found.
+    pub fn remove_pk(&mut self, key: &IndexableValue) -> Result<(), LogKeyMapError> {
+        if self.map.len() == 1 {
+            return Err(LogKeyMapError::RemovingLastElementError);
         }
-        let removed = self.set.remove(key);
+        let removed = self.map.remove(key);
 
-        if !removed {
-            return Err(LogKeySetError::NotFoundError);
+        if removed.is_none() {
+            return Err(LogKeyMapError::NotFoundError);
         }
 
         assert!(
-            self.set.len() > 0,
-            "LogKeySet should not be empty after removal"
+            self.map.len() > 0,
+            "LogKeyMap should not be empty after removal"
         );
 
         Ok(())
     }
 
     /// Get a reference to the set of LogKeys.
-    pub fn log_keys(&self) -> &HashSet<LogKey> {
-        &self.set
-    }
-}
-
-impl Ord for LogKeySet {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other)
-            .expect("LogKeySet comparison failed, possibly due to empty set")
+    pub fn log_keys(&self) -> Values<IndexableValue, LogKey> {
+        self.map.values()
     }
 }
 

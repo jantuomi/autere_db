@@ -192,6 +192,8 @@ impl<T, F: Eq + Clone> Engine<T, F> {
     }
 
     fn insert_record_to_memtables(&mut self, log_key: LogKey, record: Record) {
+        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+
         for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
             let secondary_memtable = &mut self.secondary_memtables[sk_index];
             let sk_field_index = self
@@ -202,19 +204,17 @@ impl<T, F: Eq + Clone> Engine<T, F> {
                 .unwrap();
             let sk = record.at(sk_field_index).as_indexable().unwrap();
 
-            secondary_memtable.set(sk, log_key.clone());
+            secondary_memtable.set(pk.clone(), sk, log_key.clone());
         }
 
         // Doing this last because this moves log_key
-        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
         self.primary_memtable.set(pk, log_key);
     }
 
     fn remove_record_from_memtables(&mut self, record: &Record) {
         let pk = record.at(self.primary_key_index).as_indexable().unwrap();
 
-        if let Some(plk) = self.primary_memtable.remove(&pk) {
-            // TODO this does not work (test_delete_by_multiple_indexes)
+        if let Some(_) = self.primary_memtable.remove(&pk) {
             for (sk_index, sk_field) in self.config.secondary_keys.iter_mut().enumerate() {
                 let secondary_memtable = &mut self.secondary_memtables[sk_index];
                 let sk_field_index = self
@@ -225,7 +225,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
                     .unwrap();
                 let sk = record.at(sk_field_index).as_indexable().unwrap();
 
-                secondary_memtable.remove(&sk, &plk);
+                secondary_memtable.remove(&pk, &sk);
             }
         }
     }
@@ -744,5 +744,121 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ctor::ctor;
+    use env_logger;
+
+    use super::*;
+
+    #[ctor]
+    fn init_logger() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[derive(Eq, PartialEq, Clone, Debug)]
+    enum Field {
+        Id,
+        Name,
+    }
+
+    #[derive(PartialEq, Eq, Debug, Clone)]
+    struct TestInst2 {
+        id: i64,
+        name: String,
+    }
+
+    impl TestInst2 {
+        fn into_record(self) -> Vec<Value> {
+            vec![Value::Int(self.id), Value::String(self.name)]
+        }
+
+        fn from_record(record: Vec<Value>) -> Self {
+            let mut it = record.into_iter();
+            TestInst2 {
+                id: match it.next().unwrap() {
+                    Value::Int(i) => i,
+                    _ => panic!("Expected int"),
+                },
+                name: match it.next().unwrap() {
+                    Value::String(s) => s,
+                    _ => panic!("Expected string"),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_memtable_insert_and_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let capacity = 5;
+        let segment_size = capacity * 2 * 8 + METADATA_FILE_HEADER_SIZE;
+
+        let mut db = DB::configure()
+            .data_dir(data_dir.to_str().unwrap())
+            .schema(vec![
+                (Field::Id, Type::int()),
+                (Field::Name, Type::string()),
+            ])
+            .primary_key(Field::Id)
+            .secondary_keys(vec![Field::Name])
+            .from_record(TestInst2::from_record)
+            .into_record(TestInst2::into_record)
+            .segment_size(segment_size)
+            .initialize()
+            .expect("Failed to create DB");
+
+        let engine = &mut db.engine;
+
+        let inst = TestInst2 {
+            id: 0,
+            name: "foo".to_owned(),
+        };
+        let id = IndexableValue::Int(0);
+
+        assert_eq!(engine.primary_memtable.get(&id), None);
+        assert_eq!(
+            engine.secondary_memtables[0]
+                .find_by(&IndexableValue::String("foo".to_owned()))
+                .len(),
+            0
+        );
+        engine.insert_record_to_memtables(
+            LogKey::new(1, 0),
+            Record::from(&inst.clone().into_record()),
+        );
+        assert_eq!(engine.primary_memtable.get(&id), Some(&LogKey::new(1, 0)));
+        assert_eq!(
+            engine.secondary_memtables[0]
+                .find_by(&IndexableValue::String("foo".to_owned()))
+                .len(),
+            1
+        );
+
+        engine.insert_record_to_memtables(
+            LogKey::new(1, 1),
+            Record::from(&inst.clone().into_record()),
+        );
+        assert_eq!(engine.primary_memtable.get(&id), Some(&LogKey::new(1, 1)));
+        assert_eq!(
+            engine.secondary_memtables[0]
+                .find_by(&IndexableValue::String("foo".to_owned()))
+                .len(),
+            1
+        );
+
+        engine.remove_record_from_memtables(&Record::from(&inst.into_record()));
+        assert_eq!(engine.primary_memtable.get(&id), None);
+        assert_eq!(
+            engine.secondary_memtables[0]
+                .find_by(&IndexableValue::String("foo".to_owned()))
+                .len(),
+            0
+        );
     }
 }

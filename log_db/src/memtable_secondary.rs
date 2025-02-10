@@ -1,16 +1,15 @@
 use once_cell::sync::Lazy;
 
 use super::*;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{btree_map::Values, BTreeMap};
 
 pub struct SecondaryMemtable {
-    /// Map of records indexed by key. The value is the set of primary key values of records
-    /// that have the secondary key value. The actual `Record` objects are stored in the
-    /// primary memtable, which acts as the shared heap.
-    records: BTreeMap<IndexableValue, LogKeySet>,
+    /// A 2-layer map of records indexed by SK => PK => LogKey.
+    /// The PK information is required to tell two records apart.
+    records: BTreeMap<IndexableValue, LogKeyMap>,
 }
 
-static EMPTY_SET: Lazy<HashSet<LogKey>> = Lazy::new(|| HashSet::new());
+static EMPTY_MAP: Lazy<BTreeMap<IndexableValue, LogKey>> = Lazy::new(|| BTreeMap::new());
 
 impl SecondaryMemtable {
     pub fn new() -> SecondaryMemtable {
@@ -19,38 +18,39 @@ impl SecondaryMemtable {
         }
     }
 
-    pub fn set(&mut self, key: IndexableValue, value: LogKey) {
-        match self.records.get_mut(&key) {
-            Some(set) => {
-                set.insert(value);
+    pub fn set(&mut self, pk: IndexableValue, sk: IndexableValue, value: LogKey) {
+        match self.records.get_mut(&sk) {
+            Some(map) => {
+                map.insert(pk, value);
             }
             None => {
-                self.records.insert(key, LogKeySet::new_with_initial(value));
+                self.records
+                    .insert(sk, LogKeyMap::new_with_initial(pk, value));
             }
         };
     }
 
-    pub fn find_by(&self, key: &IndexableValue) -> &HashSet<LogKey> {
+    pub fn find_by(&self, key: &IndexableValue) -> Values<IndexableValue, LogKey> {
         match self.records.get(key) {
             Some(set) => set.log_keys(),
-            None => &EMPTY_SET,
+            None => EMPTY_MAP.values(),
         }
     }
 
-    // Remove a single log key associated with the given key. Returns `true`
+    // Remove a single mapping associated with the given PK and SK. Returns `true`
     // if the log key existed and was removed, `false` otherwise.
-    pub fn remove(&mut self, key: &IndexableValue, log_key: &LogKey) -> bool {
-        let set = match self.records.get_mut(key) {
+    pub fn remove(&mut self, pk: &IndexableValue, sk: &IndexableValue) -> bool {
+        let map = match self.records.get_mut(sk) {
             Some(set) => set,
             None => return false,
         };
-        if set.len() == 1 && set.contains(log_key) {
-            self.records.remove(key);
+        if map.len() == 1 && map.contains_pk(pk) {
+            self.records.remove(sk);
             true
         } else {
-            return match set.remove(log_key) {
+            return match map.remove_pk(pk) {
                 Ok(_) => true,
-                Err(LogKeySetError::NotFoundError) => false,
+                Err(LogKeyMapError::NotFoundError) => false,
                 Err(e) => panic!("{:?}", e),
             };
         }
@@ -58,8 +58,8 @@ impl SecondaryMemtable {
 
     pub fn range<B: RangeBounds<IndexableValue>>(&self, range: B) -> Vec<&LogKey> {
         let mut keys = Vec::new();
-        for (_, set) in self.records.range(range) {
-            keys.extend(set.log_keys().iter());
+        for (_, map) in self.records.range(range) {
+            keys.extend(map.log_keys());
         }
         keys
     }
