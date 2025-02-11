@@ -1,10 +1,10 @@
 {% extends "base.html.j2" %}
 
 {% block content %}
-<main>
-    {% include "aside.html.j2" %}
+<div id="container">
+    {% include "frag_aside.html.j2" %}
 
-    <div class="results">
+    <main id="main">
         <table>
         <thead>
             <tr>
@@ -23,6 +23,6 @@
             {% endfor %}
         </tbody>
         </table>
-    </div>
-</main>
+    </main>
+</div>
 {% endblock %}

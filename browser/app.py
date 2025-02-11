@@ -5,7 +5,7 @@ import os
 import sys
 import traceback
 import tempfile
-from flask import Flask, render_template
+from flask import Flask, render_template, request
 from flask_compress import Compress # type: ignore
 
 from log_db import DB, Bound
@@ -28,21 +28,19 @@ db = DB \
     .secondary_keys(["name"]) \
     .initialize()
 
-def error_page(message: str, code: int = 400):
-    return render_template("error.html.j2", error = message), code
-
-@app.errorhandler(404)
-def not_found(e: Exception):
-    return error_page("Not found", 404)
-
-@app.errorhandler(405)
-def method_not_allowed(e: Exception):
-    return error_page(str(e), 405)
-
 @app.errorhandler(Exception)
 def error_handler(e: Exception):
-    traceback.print_exception(e, file=sys.stderr)
-    return error_page("Internal server error", 500)
+    if e.code >= 500: # type: ignore
+        traceback.print_exception(e, file=sys.stderr)
+        error_text = "Internal Server Error"
+    else:
+        error_text = str(e)
+
+    htmz_target = request.form.get("htmz")
+    if htmz_target:
+        return render_template("frag_error.html.j2", error = error_text, container = htmz_target)
+    else:
+        return render_template("page_error.html.j2", error = error_text)
 
 @app.get("/")
 def index():
@@ -52,8 +50,8 @@ def index():
 def page_find():
     rows = db.range_by("id", Bound.unbounded(), Bound.unbounded(), limit=100)
 
-    return render_template('index.html.j2',
-        selected_form = "form_find.html.j2",
+    return render_template('page_main.html.j2',
+        selected_form = "frag_form_find.html.j2",
         field_names = ["id", "name"],
         rows = rows,
     )
@@ -62,8 +60,8 @@ def page_find():
 def page_range():
     rows = db.range_by("id", Bound.unbounded(), Bound.unbounded(), limit=100)
 
-    return render_template('index.html.j2',
-        selected_form = "form_range.html.j2",
+    return render_template('page_main.html.j2',
+        selected_form = "frag_form_range.html.j2",
         field_names = ["id", "name"],
         rows = rows,
     )

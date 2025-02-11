@@ -9,12 +9,27 @@
     <title>Database browser</title>
     <meta name="description" content="Database browser for log_db">
     {% endblock %}
-
-    <!-- -- https://leanrada.com/htmz/ -->
-    <iframe hidden name=htmz onload="setTimeout(()=>document.querySelector(contentWindow.location.hash||null)?.replaceWith(...contentDocument.body.childNodes))"></iframe>
 </head>
 <body>
   <h1><a href="/">Database browser</a></h1>
   {% block content %}{% endblock %}
+
+  <!-- https://leanrada.com/htmz/ -->
+  <iframe hidden name=htmz onload="setTimeout(()=>document.querySelector(contentWindow.location.hash||null)?.replaceWith(...contentDocument.body.childNodes))"></iframe>
+  <!-- Enable progressive enhancement for htmz -->
+  <script>
+  document.querySelectorAll("form[htmz]").forEach(function (element) {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "htmz";
+    input.value = element.attributes.replace.value;
+    element.appendChild(input);
+
+    const action = new URL(element.action);
+    action.hash = element.attributes.replace.value;
+    element.action = action.toString();
+    element.target = "htmz";
+  });
+  </script>
 </body>
 </html>

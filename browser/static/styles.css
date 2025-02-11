@@ -31,7 +31,7 @@ body {
     line-height: 24px;
 }
 
-main {
+#container {
     display: flex;
     flex-flow: row wrap;
     justify-content: space-between;
@@ -104,11 +104,11 @@ input[type*="date"]:disabled {
     color: var(--gray);
 }
 
-main > aside {
+aside {
     width: 250px;
 }
 
-main > .results {
+main {
     flex: 1;
     overflow-y: scroll;
     max-height: 100%;
