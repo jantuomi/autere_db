@@ -39,13 +39,3 @@ document.querySelectorAll("form[htmp]").forEach(function (el) {
   el.action = action.toString();
   el.target = "htmp";
 });
-
-document.querySelectorAll("a[htmp]").forEach(function (el) {
-  const re = el.attributes.replace.value;
-
-  const href = new URL(el.href);
-  href.hash = re;
-  href.searchParams.set("htmp", re);
-  el.target = "htmp";
-  el.href = href.toString();
-});

@@ -1,0 +1,9 @@
+{#
+Params
+    text    Text to render in the link
+    href    URL to link to
+#}
+
+<form method="GET" action="{{ href }}" htmp replace=form_query>
+    <button class="link" type="submit">{{ text }}</button>
+</form>
