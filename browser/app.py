@@ -51,20 +51,23 @@ def error_handler(e: Exception):
         return error("Internal Server Error", 500)
 
 @app.get("/")
-def index():
-    return page_find()
+def index_default():
+    return index("find")
 
-@app.get("/find")
-def page_find():
+@app.get("/<op>")
+def index(op: str):
+    if op not in ["find", "range", "upsert", "delete"]:
+        return error("Invalid operation", 400)
+
     rows = db.range_by("id", Bound.unbounded(), Bound.unbounded(), limit=100)
     rows = [[value_to_str(v) for v in row] for row in rows]
 
     htmp_target = request.form.get("htmp") or request.args.get("htmp")
     if htmp_target:
-        return render_template("frag_form_find.html.j2")
+        return render_template(f"frag_form_{op}.html.j2")
     else:
         return render_template('page_main.html.j2',
-            selected_form = "frag_form_find.html.j2",
+            selected_form = f"frag_form_{op}.html.j2",
             field_names = ["id", "name"],
             rows = rows,
         )
