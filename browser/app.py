@@ -5,6 +5,7 @@ import os
 import sys
 import traceback
 import tempfile
+from typing import cast
 from flask import Flask, render_template, request
 from flask_compress import Compress # type: ignore
 
@@ -105,19 +106,81 @@ def query_find():
             rows = rows,
         )
 
-@app.get("/range")
-def page_range():
-    rows = db.range_by("id", Bound.unbounded(), Bound.unbounded(), limit=100)
+@app.post("/range")
+def query_range():
+    field = request.form.get("field")
+    if not field: raise ValueError("Field is required")
+
+    from_type = request.form.get("from_type")
+    if not from_type: raise ValueError("From type is required")
+
+    to_type = request.form.get("to_type")
+    if not to_type: raise ValueError("To type is required")
+
+    field_index = db_fields.index(field)
+    if field_index == -1: raise ValueError(f"Field '{field}' not found")
+
+    match from_type:
+        case "unbounded":
+            bound_lower = Bound.unbounded()
+        case "included":
+            from_value = request.form.get("from_value")
+            try:
+                if not from_value: raise ValueError("From value is required")
+                from_value = cast_to_value(field, from_value)
+            except ValueError as e:
+                return error(str(e), 400)
+            bound_lower = Bound.included(cast(Value, from_value))
+        case "excluded":
+            from_value = request.form.get("from_value")
+            try:
+                if not from_value: raise ValueError("From value is required")
+                from_value = cast_to_value(field, from_value)
+            except ValueError as e:
+                return error(str(e), 400)
+            bound_lower = Bound.excluded(cast(Value, from_value))
+        case _:
+            return error("Invalid from type", 400)
+
+    match to_type:
+        case "unbounded":
+            bound_upper = Bound.unbounded()
+        case "included":
+            to_value = request.form.get("to_value")
+            try:
+                if not to_value: raise ValueError("To value is required")
+                to_value = cast_to_value(field, to_value)
+            except ValueError as e:
+                return error(str(e), 400)
+            bound_upper = Bound.included(cast(Value, to_value))
+        case "excluded":
+            to_value = request.form.get("to_value")
+            try:
+                if not to_value: raise ValueError("To value is required")
+                to_value = cast_to_value(field, to_value)
+            except ValueError as e:
+                return error(str(e), 400)
+            bound_upper = Bound.excluded(cast(Value, to_value))
+        case _:
+            return error("Invalid to type", 400)
+
+    tagged_rows = db.range_by(field, bound_lower, bound_upper, limit=100)
+    rows = [[value_to_str(v) for v in row] for row in tagged_rows]
 
     htmp_target = request.form.get("htmp") or request.args.get("htmp")
     if htmp_target:
-        return render_template("frag_form_range.html.j2")
+        return render_template("frag_results.html.j2",
+            field_names = ["id", "name"],
+            rows = rows,
+        )
     else:
         return render_template('page_main.html.j2',
             selected_form = "frag_form_range.html.j2",
             field_names = ["id", "name"],
             rows = rows,
         )
+
+# Utils
 
 def cast_to_value(field: str, str_value: str) -> Value | None:
     str_value = str_value.strip()
