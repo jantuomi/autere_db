@@ -180,6 +180,39 @@ def query_range():
             rows = rows,
         )
 
+@app.post("/delete")
+def query_delete():
+    field = request.form.get("field")
+    if not field: raise ValueError("Field is required")
+
+    value = request.form.get("value")
+    if not value: raise ValueError("Value is required")
+
+    field_index = db_fields.index(field)
+    if field_index == -1: raise ValueError(f"Field '{field}' not found")
+
+    try:
+        value = cast_to_value(field, value)
+    except ValueError as e:
+        return error(str(e), 400)
+
+    rows = db.delete_by(field, cast(Value, value))
+    rows = [[value_to_str(v) for v in row] for row in rows]
+
+    htmp_target = request.form.get("htmp") or request.args.get("htmp")
+    if htmp_target:
+        return render_template("frag_results.html.j2",
+            field_names = ["id", "name"],
+            rows = rows,
+        )
+    else:
+        return render_template('page_main.html.j2',
+            selected_form = "frag_form_delete.html.j2",
+            field_names = ["id", "name"],
+            rows = rows,
+        )
+
+
 # Utils
 
 def cast_to_value(field: str, str_value: str) -> Value | None:
