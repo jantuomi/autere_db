@@ -36,6 +36,22 @@ enum Field {
     Data,
 }
 
+impl AsRef<str> for Field {
+    fn as_ref(&self) -> &str {
+        match self {
+            Field::Id => "id",
+            Field::Name => "name",
+            Field::Data => "data",
+        }
+    }
+}
+
+impl Into<String> for Field {
+    fn into(self) -> String {
+        self.as_ref().to_owned()
+    }
+}
+
 #[derive(Debug)]
 struct Inst {
     pub id: i64,
@@ -610,7 +626,7 @@ fn test_batch_find_by() {
     }
 
     let batch: Vec<Value> = (2..5).map(Value::Int).collect();
-    let result = db.batch_find_by(&Field::Id, &batch).unwrap();
+    let result = db.batch_find_by(Field::Id, &batch).unwrap();
 
     assert_eq!(result.len(), batch.len());
     assert_eq!(
@@ -705,6 +721,23 @@ enum FieldWithNewNullableField {
     Name,
     Data,
     MaybeStr,
+}
+
+impl AsRef<str> for FieldWithNewNullableField {
+    fn as_ref(&self) -> &str {
+        match self {
+            FieldWithNewNullableField::Id => "id",
+            FieldWithNewNullableField::Name => "name",
+            FieldWithNewNullableField::Data => "data",
+            FieldWithNewNullableField::MaybeStr => "maybe_str",
+        }
+    }
+}
+
+impl Into<String> for FieldWithNewNullableField {
+    fn into(self) -> String {
+        self.as_ref().to_owned()
+    }
 }
 
 struct InstWithNewNullableField {

@@ -37,17 +37,17 @@ use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
 use record::*;
 
-pub struct DB<T, F: Eq + Clone> {
-    engine: Engine<T, F>,
+pub struct DB<T> {
+    engine: Engine<T>,
 }
 
-impl<T, F: Eq + Clone> DB<T, F> {
+impl<T> DB<T> {
     /// Create a new database configuration builder.
-    pub fn configure() -> ConfigBuilder<T, F> {
+    pub fn configure() -> ConfigBuilder<T> {
         ConfigBuilder::new()
     }
 
-    fn initialize(config: Config<T, F>) -> DBResult<DB<T, F>> {
+    fn initialize(config: Config<T>) -> DBResult<DB<T>> {
         let engine = Engine::initialize(config)?;
         Ok(DB { engine })
     }
@@ -85,9 +85,13 @@ impl<T, F: Eq + Clone> DB<T, F> {
     }
 
     /// Get a collection of records based on an indexed field value.
-    pub fn find_by(&mut self, field: &F, value: &Value) -> DBResult<Vec<T>> {
+    pub fn find_by(&mut self, field: impl AsRef<str>, value: &Value) -> DBResult<Vec<T>> {
         let recs = self.engine.with_shared_lock(|engine| {
-            engine.batch_find_by_records(field, std::iter::once(value), &DEFAULT_QUERY_PARAMS)
+            engine.batch_find_by_records(
+                field.as_ref(),
+                std::iter::once(value),
+                &DEFAULT_QUERY_PARAMS,
+            )
         })?;
 
         Ok(recs
@@ -99,12 +103,12 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// Get a collection of records based on an indexed field value, with additional parameters.
     pub fn find_by_with_params(
         &mut self,
-        field: &F,
+        field: impl AsRef<str>,
         value: &Value,
         params: &QueryParams,
     ) -> DBResult<Vec<T>> {
         let recs = self.engine.with_shared_lock(|engine| {
-            engine.batch_find_by_records(field, std::iter::once(value), params)
+            engine.batch_find_by_records(field.as_ref(), std::iter::once(value), params)
         })?;
 
         Ok(recs
@@ -116,9 +120,13 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// Get a collection of records based on a sequence of indexed field values.
     /// Returns a vector of pairs where the first value is an index into the given sequence of values,
     /// and the second value is the record.
-    pub fn batch_find_by(&mut self, field: &F, values: &[Value]) -> DBResult<Vec<(usize, T)>> {
+    pub fn batch_find_by(
+        &mut self,
+        field: impl Into<String>,
+        values: &[Value],
+    ) -> DBResult<Vec<(usize, T)>> {
         let recs = self.engine.with_shared_lock(|engine| {
-            engine.batch_find_by_records(field, values.iter(), &DEFAULT_QUERY_PARAMS)
+            engine.batch_find_by_records(&field.into(), values.iter(), &DEFAULT_QUERY_PARAMS)
         })?;
 
         Ok(recs
@@ -132,12 +140,12 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// and the second value is the record.
     pub fn batch_find_by_with_params(
         &mut self,
-        field: &F,
+        field: impl AsRef<str>,
         values: &[Value],
         params: &QueryParams,
     ) -> DBResult<Vec<(usize, T)>> {
         let recs = self.engine.with_shared_lock(|engine| {
-            engine.batch_find_by_records(field, values.iter(), params)
+            engine.batch_find_by_records(field.as_ref(), values.iter(), params)
         })?;
 
         Ok(recs
@@ -149,9 +157,13 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// Get a collection of records based on a range of indexed field values.
     /// This method can be used to run comparison-like queries, e.g. `field >= 10`
     /// could be expressed as `db.range_by(Field::Id, 10..)`.
-    pub fn range_by<B: RangeBounds<Value>>(&mut self, field: &F, range: B) -> DBResult<Vec<T>> {
+    pub fn range_by<B: RangeBounds<Value>>(
+        &mut self,
+        field: impl AsRef<str>,
+        range: B,
+    ) -> DBResult<Vec<T>> {
         let recs = self.engine.with_shared_lock(|engine| {
-            engine.range_by_records(field, range, &DEFAULT_QUERY_PARAMS)
+            engine.range_by_records(field.as_ref(), range, &DEFAULT_QUERY_PARAMS)
         })?;
 
         Ok(recs
@@ -165,13 +177,13 @@ impl<T, F: Eq + Clone> DB<T, F> {
     /// could be expressed as `db.range_by(Field::Id, 10..)`.
     pub fn range_by_with_params<B: RangeBounds<Value>>(
         &mut self,
-        field: &F,
+        field: impl AsRef<str>,
         range: B,
         params: &QueryParams,
     ) -> DBResult<Vec<T>> {
         let recs = self
             .engine
-            .with_shared_lock(|engine| engine.range_by_records(field, range, params))?;
+            .with_shared_lock(|engine| engine.range_by_records(field.as_ref(), range, params))?;
 
         Ok(recs
             .into_iter()
@@ -185,10 +197,10 @@ impl<T, F: Eq + Clone> DB<T, F> {
     ///
     /// Deletion is done by marking the record as a tombstone. The record will still be present in the log file,
     /// but will be ignored by reads. Upon compaction, tombstoned records will be removed.
-    pub fn delete_by(&mut self, field: &F, value: &Value) -> DBResult<Vec<T>> {
+    pub fn delete_by(&mut self, field: impl AsRef<str>, value: &Value) -> DBResult<Vec<T>> {
         let recs = self
             .engine
-            .with_exclusive_lock(|engine| engine.delete_by_field(field, value))?;
+            .with_exclusive_lock(|engine| engine.delete_by_field(field.as_ref(), value))?;
 
         Ok(recs
             .into_iter()
@@ -293,6 +305,15 @@ mod tests {
     enum Field {
         Id,
         Name,
+    }
+
+    impl Into<String> for Field {
+        fn into(self) -> String {
+            match self {
+                Field::Id => "id".to_string(),
+                Field::Name => "name".to_string(),
+            }
+        }
     }
 
     struct TestInst1 {

@@ -289,10 +289,7 @@ impl Value {
     }
 }
 
-pub fn get_secondary_memtable_index_by_field<Field: Eq>(
-    sks: &Vec<Field>,
-    field: &Field,
-) -> Option<usize> {
+pub fn get_secondary_memtable_index_by_field(sks: &Vec<String>, field: &str) -> Option<usize> {
     sks.iter().position(|schema_field| schema_field == field)
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 
-pub struct Engine<T, F: Eq + Clone> {
-    pub config: Config<T, F>,
+pub struct Engine<T> {
+    pub config: Config<T>,
     pub lock_manager: LockManager,
 
     data_dir_path: PathBuf,
@@ -19,8 +19,8 @@ pub struct Engine<T, F: Eq + Clone> {
     pub secondary_memtables: Vec<SecondaryMemtable>,
 }
 
-impl<T, F: Eq + Clone> Engine<T, F> {
-    pub fn initialize(config: Config<T, F>) -> DBResult<Engine<T, F>> {
+impl<T> Engine<T> {
+    pub fn initialize(config: Config<T>) -> DBResult<Engine<T>> {
         info!("Initializing DB...");
         // If data_dir does not exist or is empty, create it and any necessary files.
         // After creation, the directory should always be in a complete state without missing files.
@@ -104,7 +104,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = APPEND_MODE.open(&active_data_path)?;
 
-        let mut engine = Engine::<T, F> {
+        let mut engine = Engine::<T> {
             config,
             lock_manager,
             data_dir_path,
@@ -247,7 +247,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
 
     pub fn batch_find_by_records<'a>(
         &mut self,
-        field: &F,
+        field: &str,
         values: impl Iterator<Item = &'a Value>,
         params: &QueryParams,
     ) -> DBResult<Vec<(usize, Record)>> {
@@ -378,7 +378,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
 
     pub fn range_by_records<B: RangeBounds<Value>>(
         &mut self,
-        field: &F,
+        field: &str,
         range: B,
         params: &QueryParams,
     ) -> DBResult<Vec<Record>> {
@@ -458,7 +458,7 @@ impl<T, F: Eq + Clone> Engine<T, F> {
         }
     }
 
-    pub fn delete_by_field(&mut self, field: &F, value: &Value) -> DBResult<Vec<Record>> {
+    pub fn delete_by_field(&mut self, field: &str, value: &Value) -> DBResult<Vec<Record>> {
         let recs: Vec<Record> = self
             .batch_find_by_records(field, std::iter::once(value), &DEFAULT_QUERY_PARAMS)?
             .into_iter()
@@ -735,6 +735,15 @@ mod tests {
     enum Field {
         Id,
         Name,
+    }
+
+    impl Into<String> for Field {
+        fn into(self) -> String {
+            match self {
+                Field::Id => "id".to_owned(),
+                Field::Name => "name".to_owned(),
+            }
+        }
     }
 
     #[derive(PartialEq, Eq, Debug, Clone)]

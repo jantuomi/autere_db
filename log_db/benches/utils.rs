@@ -17,6 +17,22 @@ pub struct Inst {
     pub data: Vec<u8>,
 }
 
+impl AsRef<str> for Field {
+    fn as_ref(&self) -> &str {
+        match self {
+            Field::Id => "id",
+            Field::Name => "name",
+            Field::Data => "data",
+        }
+    }
+}
+
+impl Into<String> for Field {
+    fn into(self) -> String {
+        self.as_ref().to_string()
+    }
+}
+
 impl Inst {
     pub fn fields() -> Vec<Field> {
         vec![Field::Id, Field::Name, Field::Data]
@@ -82,7 +98,7 @@ pub fn random_inst(from_id: i64, to_id: i64) -> Inst {
 }
 
 pub fn prefill_db(
-    db: &mut DB<Inst, Field>,
+    db: &mut DB<Inst>,
     insts: &mut Vec<Inst>,
     n_records: usize,
     compact: bool,

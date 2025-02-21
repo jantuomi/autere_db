@@ -269,7 +269,7 @@ impl Value {
 
 #[pyclass]
 struct DB {
-    db: log_db::DB<PyRecord, String>,
+    db: log_db::DB<PyRecord>,
 }
 
 #[pymethods]

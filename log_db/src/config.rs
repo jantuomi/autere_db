@@ -6,23 +6,23 @@ pub struct Schema<F> {
     pub secondary_keys: Vec<F>,
 }
 
-pub struct ConfigBuilder<T, F> {
+pub struct ConfigBuilder<T> {
     data_dir: Option<String>,
     segment_size: Option<usize>,
     write_durability: Option<WriteDurability>,
     read_consistency: Option<ReadConsistency>,
 
-    fields: Option<Vec<F>>,
-    primary_key: Option<F>,
-    secondary_keys: Option<Vec<F>>,
+    fields: Option<Vec<String>>,
+    primary_key: Option<String>,
+    secondary_keys: Option<Vec<String>>,
     from_record: Option<fn(Vec<Value>) -> T>,
     into_record: Option<fn(T) -> Vec<Value>>,
 
     _marker: PhantomData<T>,
 }
 
-impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
-    pub fn new() -> ConfigBuilder<T, F> {
+impl<T> ConfigBuilder<T> {
+    pub fn new() -> ConfigBuilder<T> {
         ConfigBuilder {
             data_dir: None,
             segment_size: None,
@@ -71,18 +71,18 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
         self
     }
 
-    pub fn fields(mut self, schema: Vec<F>) -> Self {
-        self.fields = Some(schema);
+    pub fn fields(mut self, schema: Vec<impl Into<String>>) -> Self {
+        self.fields = Some(schema.into_iter().map(|s| s.into()).collect());
         self
     }
 
-    pub fn primary_key(mut self, primary_key: F) -> Self {
-        self.primary_key = Some(primary_key);
+    pub fn primary_key(mut self, primary_key: impl Into<String>) -> Self {
+        self.primary_key = Some(primary_key.into());
         self
     }
 
-    pub fn secondary_keys(mut self, secondary_keys: Vec<F>) -> Self {
-        self.secondary_keys = Some(secondary_keys);
+    pub fn secondary_keys(mut self, secondary_keys: Vec<impl Into<String>>) -> Self {
+        self.secondary_keys = Some(secondary_keys.into_iter().map(|s| s.into()).collect());
         self
     }
 
@@ -96,7 +96,7 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
         self
     }
 
-    pub fn initialize(self) -> DBResult<DB<T, F>> {
+    pub fn initialize(self) -> DBResult<DB<T>> {
         let schema = self
             .fields
             .ok_or_else(|| DBError::ValidationError("Schema not set".to_string()))?;
@@ -134,10 +134,10 @@ impl<T, F: Eq + Clone> ConfigBuilder<T, F> {
 }
 
 #[derive(Clone)]
-pub struct Config<T, F> {
-    pub schema: Vec<F>,
-    pub primary_key: F,
-    pub secondary_keys: Vec<F>,
+pub struct Config<T> {
+    pub schema: Vec<String>,
+    pub primary_key: String,
+    pub secondary_keys: Vec<String>,
     pub from_record: fn(Vec<Value>) -> T,
     pub into_record: fn(T) -> Vec<Value>,
     pub data_dir: String,
