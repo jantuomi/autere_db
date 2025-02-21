@@ -33,25 +33,19 @@ impl Into<String> for Field {
     }
 }
 
-impl Inst {
-    pub fn fields() -> Vec<Field> {
-        vec![Field::Id, Field::Name, Field::Data]
-    }
-    pub fn primary_key() -> Field {
-        Field::Id
-    }
-    pub fn secondary_keys() -> Vec<Field> {
-        vec![Field::Name]
-    }
-
-    pub fn into_record(self) -> Vec<Value> {
+impl From<Inst> for Record {
+    fn from(inst: Inst) -> Self {
         vec![
-            Value::Int(self.id),
-            Value::String(self.name),
-            Value::Bytes(self.data),
+            Value::Int(inst.id),
+            Value::String(inst.name),
+            Value::Bytes(inst.data),
         ]
+        .into()
     }
-    pub fn from_record(record: Vec<Value>) -> Self {
+}
+
+impl From<Record> for Inst {
+    fn from(record: Record) -> Self {
         let mut it = record.into_iter();
         Inst {
             id: match it.next().unwrap() {
@@ -67,6 +61,18 @@ impl Inst {
                 _ => panic!("Expected Bytes"),
             },
         }
+    }
+}
+
+impl Inst {
+    pub fn fields() -> Vec<Field> {
+        vec![Field::Id, Field::Name, Field::Data]
+    }
+    pub fn primary_key() -> Field {
+        Field::Id
+    }
+    pub fn secondary_keys() -> Vec<Field> {
+        vec![Field::Name]
     }
 }
 
@@ -98,7 +104,7 @@ pub fn random_inst(from_id: i64, to_id: i64) -> Inst {
 }
 
 pub fn prefill_db(
-    db: &mut DB<Inst>,
+    db: &mut DB,
     insts: &mut Vec<Inst>,
     n_records: usize,
     compact: bool,

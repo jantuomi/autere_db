@@ -37,17 +37,6 @@ impl Row {
         }
         Row { values, tombstone }
     }
-
-    pub fn from(values: &[Value]) -> Row {
-        Row {
-            values: values.to_vec(),
-            tombstone: false,
-        }
-    }
-
-    pub fn at(&self, index: usize) -> &Value {
-        &self.values[index]
-    }
 }
 
 #[cfg(test)]
@@ -76,6 +65,6 @@ mod tests {
 
 #[derive(Clone, Debug)]
 pub enum TxEntry {
-    Upsert { record: Row },
-    Delete { record: Row },
+    Upsert { row: Row },
+    Delete { row: Row },
 }

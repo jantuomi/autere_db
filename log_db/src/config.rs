@@ -1,12 +1,6 @@
 use super::*;
 
-pub struct Schema<F> {
-    pub fields: Vec<F>,
-    pub primary_key: F,
-    pub secondary_keys: Vec<F>,
-}
-
-pub struct ConfigBuilder<T> {
+pub struct ConfigBuilder {
     data_dir: Option<String>,
     segment_size: Option<usize>,
     write_durability: Option<WriteDurability>,
@@ -15,14 +9,10 @@ pub struct ConfigBuilder<T> {
     fields: Option<Vec<String>>,
     primary_key: Option<String>,
     secondary_keys: Option<Vec<String>>,
-    from_record: Option<fn(Vec<Value>) -> T>,
-    into_record: Option<fn(T) -> Vec<Value>>,
-
-    _marker: PhantomData<T>,
 }
 
-impl<T> ConfigBuilder<T> {
-    pub fn new() -> ConfigBuilder<T> {
+impl ConfigBuilder {
+    pub fn new() -> ConfigBuilder {
         ConfigBuilder {
             data_dir: None,
             segment_size: None,
@@ -32,10 +22,6 @@ impl<T> ConfigBuilder<T> {
             fields: None,
             primary_key: None,
             secondary_keys: None,
-            from_record: None,
-            into_record: None,
-
-            _marker: PhantomData,
         }
     }
 
@@ -86,36 +72,18 @@ impl<T> ConfigBuilder<T> {
         self
     }
 
-    pub fn from_record(mut self, from_record: fn(Vec<Value>) -> T) -> Self {
-        self.from_record = Some(from_record);
-        self
-    }
-
-    pub fn into_record(mut self, into_record: fn(T) -> Vec<Value>) -> Self {
-        self.into_record = Some(into_record);
-        self
-    }
-
-    pub fn initialize(self) -> DBResult<DB<T>> {
+    pub fn initialize(self) -> DBResult<DB> {
         let schema = self
             .fields
             .ok_or_else(|| DBError::ValidationError("Schema not set".to_string()))?;
         let primary_key = self
             .primary_key
             .ok_or_else(|| DBError::ValidationError("Primary key not set".to_string()))?;
-        let from_record = self
-            .from_record
-            .ok_or_else(|| DBError::ValidationError("Callback from_record not set".to_string()))?;
-        let into_record = self
-            .into_record
-            .ok_or_else(|| DBError::ValidationError("Callback into_record not set".to_string()))?;
 
         let config = Config {
             schema,
             primary_key,
             secondary_keys: self.secondary_keys.unwrap_or_default(),
-            from_record,
-            into_record,
 
             data_dir: self.data_dir.clone().unwrap_or("db_data".to_string()),
             segment_size: self.segment_size.unwrap_or(4 * 1024 * 1024), // 4MB
@@ -134,12 +102,10 @@ impl<T> ConfigBuilder<T> {
 }
 
 #[derive(Clone)]
-pub struct Config<T> {
+pub struct Config {
     pub schema: Vec<String>,
     pub primary_key: String,
     pub secondary_keys: Vec<String>,
-    pub from_record: fn(Vec<Value>) -> T,
-    pub into_record: fn(T) -> Vec<Value>,
     pub data_dir: String,
     pub segment_size: usize,
     pub write_durability: WriteDurability,

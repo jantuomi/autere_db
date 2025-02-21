@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::usize;
 
-use log_db::{self, OwnedBounds, QueryParams, DEFAULT_QUERY_PARAMS};
+use log_db::{self, OwnedBounds, QueryParams, Record, DEFAULT_QUERY_PARAMS};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use rust_decimal::Decimal;
@@ -137,25 +137,28 @@ impl Config {
         }
 
         let db = config
-            .from_record(py_from_record)
-            .into_record(py_into_record)
             .initialize()
             .map_err(|e| PyException::new_err(e.to_string()))?;
         Ok(DB { db })
     }
 }
 
-fn py_from_record(record: Vec<log_db::Value>) -> Vec<Value> {
+fn py_from_record(record: Record) -> Vec<Value> {
     record
         .into_iter()
         .map(|value| Value {
             record_value: value,
         })
-        .collect()
+        .collect::<Vec<Value>>()
+        .into()
 }
 
-fn py_into_record(record: Vec<Value>) -> Vec<log_db::Value> {
-    record.into_iter().map(|value| value.record_value).collect()
+fn py_into_record(record: Vec<Value>) -> Record {
+    record
+        .into_iter()
+        .map(|value| value.record_value)
+        .collect::<Vec<log_db::Value>>()
+        .into()
 }
 
 const VALUE_INT: u8 = 0;
@@ -269,7 +272,7 @@ impl Value {
 
 #[pyclass]
 struct DB {
-    db: log_db::DB<PyRecord>,
+    db: log_db::DB,
 }
 
 #[pymethods]
@@ -288,6 +291,7 @@ impl DB {
     }
 
     pub fn upsert(&mut self, record: PyRecord) -> PyResult<()> {
+        let record: Record = py_into_record(record);
         self.db
             .upsert(record)
             .map_err(|e| PyException::new_err(e.to_string()))?;
@@ -295,9 +299,12 @@ impl DB {
     }
 
     pub fn get(&mut self, key: Value) -> PyResult<Option<PyRecord>> {
-        self.db
+        let recs = self
+            .db
             .get(&key.record_value)
-            .map_err(|e| PyException::new_err(e.to_string()))
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+
+        Ok(recs.map(|rec| py_from_record(rec)))
     }
 
     #[pyo3(signature = (field, key, offset = DEFAULT_QUERY_PARAMS.offset, limit = DEFAULT_QUERY_PARAMS.limit))]
@@ -309,9 +316,12 @@ impl DB {
         limit: usize,
     ) -> PyResult<Vec<PyRecord>> {
         let params = QueryParams { offset, limit };
-        self.db
+        let recs = self
+            .db
             .find_by_with_params(&field, &key.record_value, &params)
-            .map_err(|e| PyException::new_err(e.to_string()))
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+
+        Ok(recs.into_iter().map(|rec| py_from_record(rec)).collect())
     }
 
     #[pyo3(signature = (field, keys, offset = DEFAULT_QUERY_PARAMS.offset, limit = DEFAULT_QUERY_PARAMS.limit))]
@@ -324,9 +334,15 @@ impl DB {
     ) -> PyResult<Vec<(usize, PyRecord)>> {
         let params = QueryParams { offset, limit };
         let keys: Vec<log_db::Value> = keys.into_iter().map(|key| key.record_value).collect();
-        self.db
+        let recs = self
+            .db
             .batch_find_by_with_params(&field, &keys, &params)
-            .map_err(|e| PyException::new_err(e.to_string()))
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+
+        Ok(recs
+            .into_iter()
+            .map(|(idx, rec)| (idx, py_from_record(rec)))
+            .collect())
     }
 
     #[pyo3(signature = (field, start, end, offset = DEFAULT_QUERY_PARAMS.offset, limit = DEFAULT_QUERY_PARAMS.limit))]
@@ -352,21 +368,30 @@ impl DB {
             },
         );
 
-        self.db
+        let recs = self
+            .db
             .range_by_with_params(&field, range, &params)
-            .map_err(|e| PyException::new_err(e.to_string()))
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+
+        Ok(recs.into_iter().map(|rec| py_from_record(rec)).collect())
     }
 
     pub fn delete(&mut self, key: &Value) -> PyResult<Option<PyRecord>> {
-        self.db
+        let recs = self
+            .db
             .delete(&key.record_value)
-            .map_err(|e| PyException::new_err(e.to_string()))
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+
+        Ok(recs.map(|rec| py_from_record(rec)))
     }
 
     pub fn delete_by(&mut self, field: PyField, key: &Value) -> PyResult<Vec<PyRecord>> {
-        self.db
+        let recs = self
+            .db
             .delete_by(&field, &key.record_value)
-            .map_err(|e| PyException::new_err(e.to_string()))
+            .map_err(|e| PyException::new_err(e.to_string()))?;
+
+        Ok(recs.into_iter().map(|rec| py_from_record(rec)).collect())
     }
 
     pub fn tx_begin(&mut self) -> PyResult<()> {

@@ -46,9 +46,9 @@ impl AsRef<str> for Field {
     }
 }
 
-impl Into<String> for Field {
-    fn into(self) -> String {
-        self.as_ref().to_owned()
+impl From<Field> for String {
+    fn from(field: Field) -> String {
+        field.as_ref().to_owned()
     }
 }
 
@@ -59,31 +59,23 @@ struct Inst {
     pub data: Vec<u8>,
 }
 
-impl Inst {
-    fn schema() -> Vec<Field> {
-        vec![Field::Id, Field::Name, Field::Data]
-    }
-    fn primary_key() -> Field {
-        Field::Id
-    }
-    fn secondary_keys() -> Vec<Field> {
-        vec![Field::Name]
-    }
-
-    fn into_record(self) -> Vec<Value> {
+impl From<Inst> for Record {
+    fn from(inst: Inst) -> Record {
         vec![
-            Value::Int(self.id),
-            match self.name {
+            Value::Int(inst.id),
+            match inst.name {
                 Some(name) => Value::String(name),
                 None => Value::Null,
             },
-            Value::Bytes(self.data),
+            Value::Bytes(inst.data),
         ]
+        .into()
     }
+}
 
-    fn from_record(record: Vec<Value>) -> Self {
+impl From<Record> for Inst {
+    fn from(record: Record) -> Self {
         let mut it = record.into_iter();
-
         Inst {
             id: match it.next().unwrap() {
                 Value::Int(id) => id,
@@ -102,6 +94,18 @@ impl Inst {
     }
 }
 
+impl Inst {
+    fn schema() -> Vec<Field> {
+        vec![Field::Id, Field::Name, Field::Data]
+    }
+    fn primary_key() -> Field {
+        Field::Id
+    }
+    fn secondary_keys() -> Vec<Field> {
+        vec![Field::Name]
+    }
+}
+
 #[test]
 fn test_initialize_only() {
     let data_dir = tmp_dir();
@@ -109,8 +113,6 @@ fn test_initialize_only() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -123,8 +125,6 @@ fn test_upsert_and_get_with_primary_memtable() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -137,7 +137,7 @@ fn test_upsert_and_get_with_primary_memtable() {
     };
     db.upsert(inst).unwrap();
 
-    let result = db.get(&Value::Int(1)).unwrap().unwrap();
+    let result: Inst = db.get(&Value::Int(1)).unwrap().unwrap().into();
 
     // Check that the IDs match
     assert!(result.id == id);
@@ -150,8 +150,6 @@ fn test_upsert_and_get() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -186,14 +184,14 @@ fn test_upsert_and_get() {
     .unwrap();
 
     // Get with ID = 0
-    let result = db.get(&Value::Int(0)).unwrap().unwrap();
+    let result: Inst = db.get(&Value::Int(0)).unwrap().unwrap().into();
 
     // Should match id == 0
     assert!(result.id == 0);
     assert!(result.name == None);
 
     // Get with ID = 1
-    let result = db.get(&Value::Int(1)).unwrap().unwrap();
+    let result: Inst = db.get(&Value::Int(1)).unwrap().unwrap().into();
 
     // Should match newest inst with id == 1
     assert!(result.id == 1);
@@ -207,8 +205,6 @@ fn test_get_nonexistant() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -224,8 +220,6 @@ fn test_upsert_and_find_by() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -264,6 +258,24 @@ struct InstSingleId {
     pub id: i64,
 }
 
+impl From<InstSingleId> for Record {
+    fn from(inst: InstSingleId) -> Record {
+        vec![Value::Int(inst.id)].into()
+    }
+}
+
+impl From<Record> for InstSingleId {
+    fn from(record: Record) -> Self {
+        let mut it = record.into_iter();
+        InstSingleId {
+            id: match it.next().unwrap() {
+                Value::Int(id) => id,
+                other => panic!("Invalid value type: {:?}", other),
+            },
+        }
+    }
+}
+
 impl InstSingleId {
     fn schema() -> Vec<Field> {
         vec![Field::Id]
@@ -273,19 +285,6 @@ impl InstSingleId {
     }
     fn secondary_keys() -> Vec<Field> {
         vec![]
-    }
-
-    fn into_record(self) -> Vec<Value> {
-        vec![Value::Int(self.id)]
-    }
-
-    fn from_record(record: Vec<Value>) -> Self {
-        Self {
-            id: match record[0] {
-                Value::Int(id) => id,
-                _ => panic!("Invalid value type"),
-            },
-        }
     }
 }
 
@@ -304,8 +303,6 @@ fn test_multiple_writing_threads() {
                 .fields(InstSingleId::schema())
                 .primary_key(InstSingleId::primary_key())
                 .secondary_keys(InstSingleId::secondary_keys())
-                .from_record(InstSingleId::from_record)
-                .into_record(InstSingleId::into_record)
                 .data_dir(&data_dir)
                 .initialize()
                 .expect("Failed to initialize DB instance");
@@ -324,17 +321,16 @@ fn test_multiple_writing_threads() {
         .fields(InstSingleId::schema())
         .primary_key(InstSingleId::primary_key())
         .secondary_keys(InstSingleId::secondary_keys())
-        .from_record(InstSingleId::from_record)
-        .into_record(InstSingleId::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
 
     for i in 0..threads_n {
-        let result = db
+        let result: InstSingleId = db
             .get(&Value::Int(i))
             .expect("Failed to get record")
-            .expect("Record not found");
+            .expect("Record not found")
+            .into();
 
         assert!(result.id == i);
     }
@@ -355,8 +351,6 @@ fn test_one_writer_and_multiple_reading_threads() {
                 .fields(InstSingleId::schema())
                 .primary_key(InstSingleId::primary_key())
                 .secondary_keys(InstSingleId::secondary_keys())
-                .from_record(InstSingleId::from_record)
-                .into_record(InstSingleId::into_record)
                 .data_dir(&data_dir)
                 .segment_size(1000) // should cause rotations
                 .initialize()
@@ -372,6 +366,7 @@ fn test_one_writer_and_multiple_reading_threads() {
                         continue;
                     }
                     Some(result) => {
+                        let result: InstSingleId = result.into();
                         assert!(result.id == i);
                         break;
                     }
@@ -386,8 +381,6 @@ fn test_one_writer_and_multiple_reading_threads() {
             .fields(InstSingleId::schema())
             .primary_key(InstSingleId::primary_key())
             .secondary_keys(InstSingleId::secondary_keys())
-            .from_record(InstSingleId::from_record)
-            .into_record(InstSingleId::into_record)
             .data_dir(&data_dir)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -421,8 +414,6 @@ fn test_log_is_rotated_when_capacity_reached() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .segment_size(10 * record_len) // small log segment size
         .initialize()
@@ -456,8 +447,6 @@ fn test_delete() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -498,8 +487,6 @@ fn test_delete_by() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -555,8 +542,6 @@ fn test_range_by_id() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -576,7 +561,7 @@ fn test_range_by_id() {
     let received = db
         .range_by(&Field::Id, &Value::Int(3)..&Value::Int(7))
         .unwrap();
-    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+    let received_ids: Vec<i64> = received.into_iter().map(|rec| Inst::from(rec).id).collect();
 
     assert_eq!(received_ids, vec![3, 4, 5, 6]);
 
@@ -584,19 +569,19 @@ fn test_range_by_id() {
     let received = db
         .range_by(&Field::Id, &Value::Int(3)..=&Value::Int(7))
         .unwrap();
-    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+    let received_ids: Vec<i64> = received.into_iter().map(|rec| Inst::from(rec).id).collect();
 
     assert_eq!(received_ids, vec![3, 4, 5, 6, 7]);
 
     // Test range (-inf, 7]
     let received = db.range_by(&Field::Id, ..=&Value::Int(7)).unwrap();
-    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+    let received_ids: Vec<i64> = received.into_iter().map(|rec| Inst::from(rec).id).collect();
 
     assert_eq!(received_ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
 
     // Test range (3, inf)
     let received = db.range_by(&Field::Id, &Value::Int(3)..).unwrap();
-    let received_ids: Vec<i64> = received.iter().map(|inst| inst.id).collect();
+    let received_ids: Vec<i64> = received.into_iter().map(|rec| Inst::from(rec).id).collect();
 
     assert_eq!(received_ids, vec![3, 4, 5, 6, 7, 8, 9]);
 }
@@ -608,8 +593,6 @@ fn test_batch_find_by() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -634,7 +617,10 @@ fn test_batch_find_by() {
         vec![0, 1, 2]
     );
     assert_eq!(
-        result.iter().map(|(_, inst)| inst.id).collect::<Vec<i64>>(),
+        result
+            .into_iter()
+            .map(|(_, rec)| Inst::from(rec).id)
+            .collect::<Vec<i64>>(),
         vec![2, 3, 4]
     );
 }
@@ -646,8 +632,6 @@ fn test_commit_transaction() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -684,8 +668,6 @@ fn test_rollback_transaction() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -747,42 +729,27 @@ struct InstWithNewNullableField {
     pub maybe_str: Option<String>,
 }
 
-impl InstWithNewNullableField {
-    fn schema() -> Vec<FieldWithNewNullableField> {
+impl From<InstWithNewNullableField> for Record {
+    fn from(inst: InstWithNewNullableField) -> Record {
         vec![
-            FieldWithNewNullableField::Id,
-            FieldWithNewNullableField::Name,
-            FieldWithNewNullableField::Data,
-            FieldWithNewNullableField::MaybeStr,
-        ]
-    }
-
-    fn primary_key() -> FieldWithNewNullableField {
-        FieldWithNewNullableField::Id
-    }
-
-    fn secondary_keys() -> Vec<FieldWithNewNullableField> {
-        vec![FieldWithNewNullableField::Name]
-    }
-
-    fn into_record(self) -> Vec<Value> {
-        vec![
-            Value::Int(self.id),
-            match self.name {
+            Value::Int(inst.id),
+            match inst.name {
                 Some(name) => Value::String(name),
                 None => Value::Null,
             },
-            Value::Bytes(self.data),
-            match self.maybe_str {
+            Value::Bytes(inst.data),
+            match inst.maybe_str {
                 Some(maybe_str) => Value::String(maybe_str),
                 None => Value::Null,
             },
         ]
+        .into()
     }
+}
 
-    fn from_record(record: Vec<Value>) -> Self {
+impl From<Record> for InstWithNewNullableField {
+    fn from(record: Record) -> Self {
         let mut it = record.into_iter();
-
         InstWithNewNullableField {
             id: match it.next().unwrap() {
                 Value::Int(id) => id,
@@ -807,6 +774,25 @@ impl InstWithNewNullableField {
     }
 }
 
+impl InstWithNewNullableField {
+    fn schema() -> Vec<FieldWithNewNullableField> {
+        vec![
+            FieldWithNewNullableField::Id,
+            FieldWithNewNullableField::Name,
+            FieldWithNewNullableField::Data,
+            FieldWithNewNullableField::MaybeStr,
+        ]
+    }
+
+    fn primary_key() -> FieldWithNewNullableField {
+        FieldWithNewNullableField::Id
+    }
+
+    fn secondary_keys() -> Vec<FieldWithNewNullableField> {
+        vec![FieldWithNewNullableField::Name]
+    }
+}
+
 #[test]
 fn test_add_nullable_field() {
     let data_dir = tmp_dir();
@@ -817,8 +803,6 @@ fn test_add_nullable_field() {
             .fields(Inst::schema())
             .primary_key(Inst::primary_key())
             .secondary_keys(Inst::secondary_keys())
-            .from_record(Inst::from_record)
-            .into_record(Inst::into_record)
             .data_dir(&data_dir)
             .initialize()
             .expect("Failed to initialize DB instance");
@@ -836,8 +820,6 @@ fn test_add_nullable_field() {
         .fields(InstWithNewNullableField::schema())
         .primary_key(InstWithNewNullableField::primary_key())
         .secondary_keys(InstWithNewNullableField::secondary_keys())
-        .from_record(InstWithNewNullableField::from_record)
-        .into_record(InstWithNewNullableField::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -868,8 +850,6 @@ fn test_delete_by_multiple_indexes() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -907,8 +887,6 @@ fn test_find_by_with_offset_and_limit() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -933,7 +911,10 @@ fn test_find_by_with_offset_and_limit() {
                 limit: 3,
             },
         )
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|rec| Inst::from(rec))
+        .collect::<Vec<Inst>>();
 
     assert_eq!(result.len(), 3);
     assert_eq!(result[0].id, 2);
@@ -949,8 +930,6 @@ fn test_batch_find_by_with_offset_and_limit() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -976,11 +955,14 @@ fn test_batch_find_by_with_offset_and_limit() {
                 limit: 2,
             },
         )
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|(_, rec)| Inst::from(rec))
+        .collect::<Vec<Inst>>();
 
     assert_eq!(result.len(), 2);
-    assert_eq!(result[0].1.id, 3);
-    assert_eq!(result[1].1.id, 4);
+    assert_eq!(result[0].id, 3);
+    assert_eq!(result[1].id, 4);
 }
 
 #[test]
@@ -991,8 +973,6 @@ fn test_range_by_with_offset_and_limit() {
         .fields(Inst::schema())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(&data_dir)
         .initialize()
         .expect("Failed to initialize DB instance");
@@ -1017,7 +997,10 @@ fn test_range_by_with_offset_and_limit() {
                 limit: 3,
             },
         )
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .map(|rec| Inst::from(rec))
+        .collect::<Vec<Inst>>();
 
     assert_eq!(result.len(), 3);
     assert_eq!(result[0].id, 3);

@@ -18,8 +18,6 @@ pub fn upsert_compacted(c: &mut Criterion) {
         .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
@@ -50,8 +48,6 @@ pub fn delete_existing_compacted(c: &mut Criterion) {
         .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
@@ -89,8 +85,6 @@ pub fn upsert_write_durability(c: &mut Criterion) {
                 .fields(Inst::fields())
                 .primary_key(Inst::primary_key())
                 .secondary_keys(Inst::secondary_keys())
-                .from_record(Inst::from_record)
-                .into_record(Inst::into_record)
                 .data_dir(data_dir)
                 .write_durability(mode.clone())
                 .initialize()
@@ -117,8 +111,6 @@ pub fn get_existing_compacted(c: &mut Criterion) {
         .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");
@@ -153,8 +145,6 @@ pub fn find_by_existing_compacted(c: &mut Criterion) {
         .fields(Inst::fields())
         .primary_key(Inst::primary_key())
         .secondary_keys(Inst::secondary_keys())
-        .from_record(Inst::from_record)
-        .into_record(Inst::into_record)
         .data_dir(data_dir)
         .initialize()
         .expect("Failed to initialize DB");

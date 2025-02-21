@@ -1,7 +1,7 @@
 use super::*;
 
-pub struct Engine<T> {
-    pub config: Config<T>,
+pub struct Engine {
+    pub config: Config,
     pub lock_manager: LockManager,
 
     data_dir_path: PathBuf,
@@ -19,8 +19,8 @@ pub struct Engine<T> {
     pub secondary_memtables: Vec<SecondaryMemtable>,
 }
 
-impl<T> Engine<T> {
-    pub fn initialize(config: Config<T>) -> DBResult<Engine<T>> {
+impl Engine {
+    pub fn initialize(config: Config) -> DBResult<Engine> {
         info!("Initializing DB...");
         // If data_dir does not exist or is empty, create it and any necessary files.
         // After creation, the directory should always be in a complete state without missing files.
@@ -104,7 +104,7 @@ impl<T> Engine<T> {
             Path::new(&config.data_dir).join(active_metadata_header.uuid.to_string());
         let active_data_file = APPEND_MODE.open(&active_data_path)?;
 
-        let mut engine = Engine::<T> {
+        let mut engine = Engine {
             config,
             lock_manager,
             data_dir_path,
@@ -161,9 +161,9 @@ impl<T> Engine<T> {
                 let log_key = LogKey::new(segnum, index);
 
                 if row.tombstone {
-                    self.remove_record_from_memtables(&row);
+                    self.remove_row_from_memtables(&row.values);
                 } else {
-                    self.insert_record_to_memtables(log_key, row);
+                    self.insert_row_to_memtables(log_key, row.values);
                 }
 
                 // Update from_index in case this is the last iteration: we need to know the next
@@ -183,8 +183,8 @@ impl<T> Engine<T> {
         Ok(())
     }
 
-    fn insert_record_to_memtables(&mut self, log_key: LogKey, record: Row) {
-        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+    fn insert_row_to_memtables(&mut self, log_key: LogKey, row_values: Vec<Value>) {
+        let pk = row_values[self.primary_key_index].as_indexable().unwrap();
 
         for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
             let secondary_memtable = &mut self.secondary_memtables[sk_index];
@@ -194,7 +194,7 @@ impl<T> Engine<T> {
                 .iter()
                 .position(|f| sk_field == f)
                 .unwrap();
-            let sk = record.at(sk_field_index).as_indexable().unwrap();
+            let sk = row_values[sk_field_index].as_indexable().unwrap();
 
             secondary_memtable.set(pk.clone(), sk, log_key.clone());
         }
@@ -203,8 +203,8 @@ impl<T> Engine<T> {
         self.primary_memtable.set(pk, log_key);
     }
 
-    fn remove_record_from_memtables(&mut self, record: &Row) {
-        let pk = record.at(self.primary_key_index).as_indexable().unwrap();
+    fn remove_row_from_memtables(&mut self, row_values: &Vec<Value>) {
+        let pk = row_values[self.primary_key_index].as_indexable().unwrap();
 
         if let Some(_) = self.primary_memtable.remove(&pk) {
             for (sk_index, sk_field) in self.config.secondary_keys.iter_mut().enumerate() {
@@ -215,7 +215,7 @@ impl<T> Engine<T> {
                     .iter()
                     .position(|f| sk_field == f)
                     .unwrap();
-                let sk = record.at(sk_field_index).as_indexable().unwrap();
+                let sk = row_values[sk_field_index].as_indexable().unwrap();
 
                 secondary_memtable.remove(&pk, &sk);
             }
@@ -235,7 +235,7 @@ impl<T> Engine<T> {
             return self.upsert_record(record);
         }
 
-        self.tx_log.push(TxEntry::Upsert { record });
+        self.tx_log.push(TxEntry::Upsert { row: record });
 
         if !self.tx_active {
             self.commit_transaction()?;
@@ -471,7 +471,7 @@ impl<T> Engine<T> {
         // TODO: refactor the clone out of here
         for record in &recs {
             self.tx_log.push(TxEntry::Delete {
-                record: record.clone(),
+                row: record.clone(),
             });
         }
 
@@ -501,8 +501,8 @@ impl<T> Engine<T> {
         debug!("Serializing tx_log to byte arrays");
         for tx_entry in &self.tx_log {
             let record = match tx_entry {
-                TxEntry::Upsert { record } => record,
-                TxEntry::Delete { record } => record,
+                TxEntry::Upsert { row: record } => record,
+                TxEntry::Delete { row: record } => record,
             };
 
             let serialized = record.serialize();
@@ -544,8 +544,8 @@ impl<T> Engine<T> {
         debug!("Updating memtables");
         for (log_key, tx_entry) in pending_memtable_ops {
             match tx_entry {
-                TxEntry::Upsert { record } => self.insert_record_to_memtables(log_key, record),
-                TxEntry::Delete { record } => self.remove_record_from_memtables(&record),
+                TxEntry::Upsert { row } => self.insert_row_to_memtables(log_key, row.values),
+                TxEntry::Delete { row } => self.remove_row_from_memtables(&row.values),
             }
         }
         debug!("Commit done");
@@ -580,8 +580,7 @@ impl<T> Engine<T> {
         )
         .map(|item| {
             (
-                item.row
-                    .at(self.primary_key_index)
+                item.row.values[self.primary_key_index]
                     .as_indexable()
                     .expect("Primary key was not indexable"),
                 item.row,
@@ -752,12 +751,14 @@ mod tests {
         name: String,
     }
 
-    impl TestInst2 {
-        fn into_record(self) -> Vec<Value> {
-            vec![Value::Int(self.id), Value::String(self.name)]
+    impl From<TestInst2> for Vec<Value> {
+        fn from(inst: TestInst2) -> Self {
+            vec![Value::Int(inst.id), Value::String(inst.name)]
         }
+    }
 
-        fn from_record(record: Vec<Value>) -> Self {
+    impl From<Vec<Value>> for TestInst2 {
+        fn from(record: Vec<Value>) -> Self {
             let mut it = record.into_iter();
             TestInst2 {
                 id: match it.next().unwrap() {
@@ -785,8 +786,6 @@ mod tests {
             .fields(vec![Field::Id, Field::Name])
             .primary_key(Field::Id)
             .secondary_keys(vec![Field::Name])
-            .from_record(TestInst2::from_record)
-            .into_record(TestInst2::into_record)
             .segment_size(segment_size)
             .initialize()
             .expect("Failed to create DB");
@@ -806,8 +805,7 @@ mod tests {
                 .len(),
             0
         );
-        engine
-            .insert_record_to_memtables(LogKey::new(1, 0), Row::from(&inst.clone().into_record()));
+        engine.insert_row_to_memtables(LogKey::new(1, 0), inst.clone().into());
         assert_eq!(engine.primary_memtable.get(&id), Some(&LogKey::new(1, 0)));
         assert_eq!(
             engine.secondary_memtables[0]
@@ -816,8 +814,7 @@ mod tests {
             1
         );
 
-        engine
-            .insert_record_to_memtables(LogKey::new(1, 1), Row::from(&inst.clone().into_record()));
+        engine.insert_row_to_memtables(LogKey::new(1, 1), inst.clone().into());
         assert_eq!(engine.primary_memtable.get(&id), Some(&LogKey::new(1, 1)));
         assert_eq!(
             engine.secondary_memtables[0]
@@ -826,7 +823,7 @@ mod tests {
             1
         );
 
-        engine.remove_record_from_memtables(&Row::from(&inst.into_record()));
+        engine.remove_row_from_memtables(&inst.into());
         assert_eq!(engine.primary_memtable.get(&id), None);
         assert_eq!(
             engine.secondary_memtables[0]
