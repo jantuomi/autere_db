@@ -23,7 +23,7 @@ mod lock;
 mod log_reader_forward;
 mod memtable_primary;
 mod memtable_secondary;
-mod record;
+mod row;
 
 pub use common::{DBError, DBResult, OwnedBounds, QueryParams, Value, DEFAULT_QUERY_PARAMS};
 pub use config::{ReadConsistency, Schema, WriteDurability};
@@ -35,7 +35,7 @@ use lock::*;
 use log_reader_forward::*;
 use memtable_primary::PrimaryMemtable;
 use memtable_secondary::SecondaryMemtable;
-use record::*;
+use row::*;
 
 pub struct DB<T> {
     engine: Engine<T>,
@@ -55,11 +55,11 @@ impl<T> DB<T> {
     /// Insert a record into the database. If the primary key value already exists,
     /// the existing record will be replaced by the supplied one.
     pub fn upsert(&mut self, recordable: T) -> DBResult<()> {
-        let record = Record::from(&(self.engine.config.into_record)(recordable));
-        debug!("Upserting record: {:?}", record);
+        let row = Row::from(&(self.engine.config.into_record)(recordable));
+        debug!("Upserting record: {:?}", row);
 
         self.engine
-            .with_exclusive_lock(move |engine| engine.upsert_record(record))?;
+            .with_exclusive_lock(move |engine| engine.upsert_record(row))?;
 
         Ok(())
     }
@@ -67,7 +67,7 @@ impl<T> DB<T> {
     /// Get a record by its primary index value.
     /// E.g. `db.get(Value::Int(10))`.
     pub fn get(&mut self, value: &Value) -> DBResult<Option<T>> {
-        let recs = self.engine.with_shared_lock(|engine| {
+        let tagged_rows = self.engine.with_shared_lock(|engine| {
             engine.batch_find_by_records(
                 // TODO: This clone is only here to appease the borrow checker
                 &engine.config.primary_key.clone(),
@@ -76,12 +76,12 @@ impl<T> DB<T> {
             )
         })?;
 
-        assert!(recs.len() <= 1);
+        assert!(tagged_rows.len() <= 1);
 
-        Ok(recs
+        Ok(tagged_rows
             .into_iter()
             .next()
-            .map(|(_, rec)| (self.engine.config.from_record)(rec.values)))
+            .map(|(_, row)| (self.engine.config.from_record)(row.values)))
     }
 
     /// Get a collection of records based on an indexed field value.

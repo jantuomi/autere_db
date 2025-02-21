@@ -155,15 +155,15 @@ impl<T> Engine<T> {
             let data_path = self.data_dir_path.join(metadata_header.uuid.to_string());
             let data_file = READ_MODE.open(data_path)?;
 
-            for ForwardLogReaderItem { record, index } in
+            for ForwardLogReaderItem { row, index } in
                 ForwardLogReader::new_with_index(metadata_file, data_file, from_index)
             {
                 let log_key = LogKey::new(segnum, index);
 
-                if record.tombstone {
-                    self.remove_record_from_memtables(&record);
+                if row.tombstone {
+                    self.remove_record_from_memtables(&row);
                 } else {
-                    self.insert_record_to_memtables(log_key, record);
+                    self.insert_record_to_memtables(log_key, row);
                 }
 
                 // Update from_index in case this is the last iteration: we need to know the next
@@ -183,7 +183,7 @@ impl<T> Engine<T> {
         Ok(())
     }
 
-    fn insert_record_to_memtables(&mut self, log_key: LogKey, record: Record) {
+    fn insert_record_to_memtables(&mut self, log_key: LogKey, record: Row) {
         let pk = record.at(self.primary_key_index).as_indexable().unwrap();
 
         for (sk_index, sk_field) in self.config.secondary_keys.iter().enumerate() {
@@ -203,7 +203,7 @@ impl<T> Engine<T> {
         self.primary_memtable.set(pk, log_key);
     }
 
-    fn remove_record_from_memtables(&mut self, record: &Record) {
+    fn remove_record_from_memtables(&mut self, record: &Row) {
         let pk = record.at(self.primary_key_index).as_indexable().unwrap();
 
         if let Some(_) = self.primary_memtable.remove(&pk) {
@@ -222,7 +222,7 @@ impl<T> Engine<T> {
         }
     }
 
-    pub fn upsert_record(&mut self, record: Record) -> DBResult<()> {
+    pub fn upsert_record(&mut self, record: Row) -> DBResult<()> {
         debug!("Opening file in append mode...");
 
         if !self.ensure_metadata_file_is_active()?
@@ -250,7 +250,7 @@ impl<T> Engine<T> {
         field: &str,
         values: impl Iterator<Item = &'a Value>,
         params: &QueryParams,
-    ) -> DBResult<Vec<(usize, Record)>> {
+    ) -> DBResult<Vec<(usize, Row)>> {
         let indexables = values
             .map(|value| {
                 value.as_indexable().ok_or(DBError::ValidationError(
@@ -321,7 +321,7 @@ impl<T> Engine<T> {
     fn read_tagged_log_keys<'a>(
         &self,
         log_keys: impl Iterator<Item = &'a (usize, &'a LogKey)>,
-    ) -> DBResult<Vec<(usize, Record)>> {
+    ) -> DBResult<Vec<(usize, Row)>> {
         let mut records = vec![];
         let mut log_keys_map = BTreeMap::new();
 
@@ -366,7 +366,7 @@ impl<T> Engine<T> {
                 let mut data_buf = vec![0; data_length as usize];
                 data_file.read_exact(&mut data_buf)?;
 
-                let record = Record::deserialize(&data_buf);
+                let record = Row::deserialize(&data_buf);
                 records.push((*tag, record));
 
                 current_metadata_offset = new_metadata_offset + row_length;
@@ -381,7 +381,7 @@ impl<T> Engine<T> {
         field: &str,
         range: B,
         params: &QueryParams,
-    ) -> DBResult<Vec<Record>> {
+    ) -> DBResult<Vec<Row>> {
         fn range_bound_to_indexable(bound: Bound<&Value>) -> DBResult<Bound<IndexableValue>> {
             match bound {
                 Bound::Included(value) => value
@@ -458,8 +458,8 @@ impl<T> Engine<T> {
         }
     }
 
-    pub fn delete_by_field(&mut self, field: &str, value: &Value) -> DBResult<Vec<Record>> {
-        let recs: Vec<Record> = self
+    pub fn delete_by_field(&mut self, field: &str, value: &Value) -> DBResult<Vec<Row>> {
+        let recs: Vec<Row> = self
             .batch_find_by_records(field, std::iter::once(value), &DEFAULT_QUERY_PARAMS)?
             .into_iter()
             .map(|(_, mut rec)| {
@@ -573,18 +573,18 @@ impl<T> Engine<T> {
         let active_num = parse_segment_number(&active_target)?;
 
         debug!("Reading segment data into a BTreeMap");
-        let mut pk_to_item_map: BTreeMap<&IndexableValue, &Record> = BTreeMap::new();
-        let forward_read_items: Vec<(IndexableValue, Record)> = ForwardLogReader::new(
+        let mut pk_to_item_map: BTreeMap<&IndexableValue, &Row> = BTreeMap::new();
+        let forward_read_items: Vec<(IndexableValue, Row)> = ForwardLogReader::new(
             self.active_metadata_file.try_clone()?,
             self.active_data_file.try_clone()?,
         )
         .map(|item| {
             (
-                item.record
+                item.row
                     .at(self.primary_key_index)
                     .as_indexable()
                     .expect("Primary key was not indexable"),
-                item.record,
+                item.row,
             )
         })
         .collect();
@@ -806,10 +806,8 @@ mod tests {
                 .len(),
             0
         );
-        engine.insert_record_to_memtables(
-            LogKey::new(1, 0),
-            Record::from(&inst.clone().into_record()),
-        );
+        engine
+            .insert_record_to_memtables(LogKey::new(1, 0), Row::from(&inst.clone().into_record()));
         assert_eq!(engine.primary_memtable.get(&id), Some(&LogKey::new(1, 0)));
         assert_eq!(
             engine.secondary_memtables[0]
@@ -818,10 +816,8 @@ mod tests {
             1
         );
 
-        engine.insert_record_to_memtables(
-            LogKey::new(1, 1),
-            Record::from(&inst.clone().into_record()),
-        );
+        engine
+            .insert_record_to_memtables(LogKey::new(1, 1), Row::from(&inst.clone().into_record()));
         assert_eq!(engine.primary_memtable.get(&id), Some(&LogKey::new(1, 1)));
         assert_eq!(
             engine.secondary_memtables[0]
@@ -830,7 +826,7 @@ mod tests {
             1
         );
 
-        engine.remove_record_from_memtables(&Record::from(&inst.into_record()));
+        engine.remove_record_from_memtables(&Row::from(&inst.into_record()));
         assert_eq!(engine.primary_memtable.get(&id), None);
         assert_eq!(
             engine.secondary_memtables[0]

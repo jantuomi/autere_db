@@ -6,7 +6,7 @@ pub struct ForwardLogReader {
 }
 
 pub struct ForwardLogReaderItem {
-    pub record: Record,
+    pub row: Row,
     pub index: u64,
 }
 
@@ -74,8 +74,8 @@ impl ForwardLogReader {
             let mut result_buf = vec![0; entry_length as usize];
             self.data_reader.read_exact(&mut result_buf)?;
 
-            let record = Record::deserialize(&result_buf);
-            return Ok(Some(ForwardLogReaderItem { record, index }));
+            let row = Row::deserialize(&result_buf);
+            return Ok(Some(ForwardLogReaderItem { row, index }));
         }
     }
 }
@@ -121,10 +121,10 @@ mod tests {
 
         // There are two records in the log with "schema" with one field: Bytes
 
-        let first_record = forward_log_reader
+        let ForwardLogReaderItem { row, index: _ } = forward_log_reader
             .next()
             .expect("Failed to read the first record");
-        assert!(match &first_record.record.values[..] {
+        assert!(match &row.values[..] {
             [Value::Bytes(bytes)] => bytes.len() == 256,
             _ => false,
         });

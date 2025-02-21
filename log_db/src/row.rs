@@ -1,12 +1,12 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-pub struct Record {
+pub struct Row {
     pub values: Vec<Value>,
     pub tombstone: bool,
 }
 
-impl Record {
+impl Row {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
@@ -22,7 +22,7 @@ impl Record {
         bytes
     }
 
-    pub fn deserialize(bytes: &[u8]) -> Record {
+    pub fn deserialize(bytes: &[u8]) -> Row {
         assert!(bytes.len() > 0);
 
         let mut values = Vec::new();
@@ -35,11 +35,11 @@ impl Record {
             values.push(rv);
             start += consumed;
         }
-        Record { values, tombstone }
+        Row { values, tombstone }
     }
 
-    pub fn from(values: &[Value]) -> Record {
-        Record {
+    pub fn from(values: &[Value]) -> Row {
+        Row {
             values: values.to_vec(),
             tombstone: false,
         }
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn test_record_serialize_deserialize() {
-        let record = Record {
+        let record = Row {
             values: vec![
                 Value::Int(1),
                 Value::String("hello".to_string()),
@@ -66,7 +66,7 @@ mod tests {
         };
 
         let serialized = record.serialize();
-        let deserialized = Record::deserialize(&serialized);
+        let deserialized = Row::deserialize(&serialized);
         let reserialized = deserialized.serialize();
 
         assert_eq!(serialized.len(), reserialized.len());
@@ -76,6 +76,6 @@ mod tests {
 
 #[derive(Clone, Debug)]
 pub enum TxEntry {
-    Upsert { record: Record },
-    Delete { record: Record },
+    Upsert { record: Row },
+    Delete { record: Row },
 }
