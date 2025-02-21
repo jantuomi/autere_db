@@ -376,3 +376,15 @@ Currently, the database opens and closes files often during reads and writes. To
 To optimize this, the database will keep the file handles open for the duration of the process. The file descriptors are stored in a seg_num -> fs::File map, which is updated periodically. The `active` symlink is replaced by a file of the same name that contains the active segment number as a big-endian 16-bit integer. This file is opened once and read every time the active segment number is needed, i.e. at the beginning of each read and write. Reading and writing to the file is faster than querying the filesystem metadata and parsing the symlink target.
 
 When the active segment changes, the process should reopen the files between the previous stored segment number and the new active segment number, since they have been compacted.
+
+## 2025-02-19 Schema persistence and evolution
+
+The schema handling up to now has been in a weird spot: the DB requires a schema, i.e. a mapping from fields (types with bound `F: Eq`) to database types (`Type`), but does not persist this information anywhere. Every initialization of the DB might have a different view of the schema. This is fine if the readers are all instances of a single piece software, but if the DB is accessed by multiple different applications, the schema must be somehow communicated between them out-of-band. This is not ideal, of course.
+
+I tried removing the schema completely. All validation is outsourced to the user. This works, but has even more quirks, mostly stemming from the fact that now the database has no idea what the data is supposed to look like.
+
+I started implementing a database browser application for demoing purposes, and realized that the schema must be persisted in some way, since otherwise the browser app would have to either 1) infer the schema from the data, or 2) require the user to input the schema somehow. Both of these are kind of unsuitable for the feel I'm going for with this project.
+
+My current idea is to store the schema in a file in the data directory upon first initialization. The schema file contains a mapping from field names to types. The schema file is read upon DB initialization and used to validate the data.
+
+The user can change the schema only by adding new nullable fields. This is the only schema evolution action that is both backwards and forwards compatible, which is a nice property to have. Adding nullability to an existing field is backwards compatible, but not forwards compatible. The compatibility mode (BACKWARDS, FULL) might be a good thing to expose to the user.
