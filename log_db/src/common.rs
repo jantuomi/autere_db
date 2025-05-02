@@ -564,9 +564,11 @@ impl<T> RangeBounds<T> for OwnedBounds<T> {
 pub struct QueryParams {
     pub offset: usize,
     pub limit: usize,
+    pub sort_asc: bool,
 }
 
 pub static DEFAULT_QUERY_PARAMS: QueryParams = QueryParams {
     offset: 0,
     limit: usize::MAX,
+    sort_asc: true,
 };

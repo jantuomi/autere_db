@@ -1,19 +1,23 @@
 from dotenv import load_dotenv
+from werkzeug.utils import redirect
 load_dotenv()
 
 import os
 import sys
 import traceback
 import tempfile
-from typing import cast
 from flask import Flask, render_template, request
 from flask_compress import Compress # type: ignore
+from flask_apscheduler import APScheduler #type: ignore
+import datetime
+from dataclasses import dataclass
 
-import log_db
+import uuid
 from log_db import DB, Bound, Value
 
 app = Flask(__name__)
 Compress(app)
+scheduler = APScheduler()
 
 BASE_URL = os.environ["BASE_URL"]
 DB_DIR = os.environ["DB_DIR"] if "DB_DIR" in os.environ else tempfile.TemporaryDirectory().name
@@ -22,26 +26,27 @@ print("""\n"""
       f"""BASE_URL:      {BASE_URL}\n"""
       f"""DB_DIR:        {DB_DIR}\n""")
 
-db_fields = ["id", "name"]
-db_types = ["int", "string"]
+db_fields = ["id", "ts", "username", "message"]
+db_types  = ["string", "int", "string", "string"]
+
+@dataclass
+class Message:
+    id: str
+    ts: str
+    username: str
+    msg: str
 
 db = DB \
     .configure() \
     .data_dir(DB_DIR) \
     .fields(db_fields) \
     .primary_key("id") \
-    .secondary_keys(["name"]) \
+    .secondary_keys(["ts"]) \
     .initialize()
 
 def error(e: str, code: int):
     error_text = f"HTTP {code}: {e}"
-    #return render_template("page_error.html.j2", error = error_text)
-
-    htmp_target = request.form.get("htmp") or request.args.get("htmp")
-    if htmp_target:
-        return render_template("frag_error.html.j2", error = error_text, container = htmp_target)
-    else:
-        return render_template("page_error.html.j2", error = error_text)
+    return render_template("page_error.html.j2", error = error_text)
 
 @app.errorhandler(Exception)
 def error_handler(e: Exception):
@@ -52,191 +57,53 @@ def error_handler(e: Exception):
         return error("Internal Server Error", 500)
 
 @app.get("/")
-def index_default():
-    return index("find")
-
-@app.get("/<op>")
-def index(op: str):
-    if op not in ["find", "range", "upsert", "delete"]:
-        return error("Invalid operation", 400)
-
-    rows = db.range_by("id", Bound.unbounded(), Bound.unbounded(), limit=100)
-    rows = [[value_to_str(v) for v in row] for row in rows]
+def index():
+    messages = get_messages()
 
     htmp_target = request.form.get("htmp") or request.args.get("htmp")
     if htmp_target:
-        return render_template(f"frag_form_{op}.html.j2")
+        return render_template("frag_messages.html.j2", messages = messages)
     else:
-        return render_template('page_main.html.j2',
-            selected_form = f"frag_form_{op}.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
-        )
+        return render_template("page_index.html.j2", messages = messages)
 
-@app.post("/find")
+@app.post("/")
 def query_find():
-    field = request.form.get("field")
-    if not field: raise ValueError("Field is required")
+    username = request.form.get("username")
+    if not username: raise ValueError("username is required")
 
-    values = request.form.get("values")
-    if not values: raise ValueError("Values are required")
+    message = request.form.get("message")
+    if not message: raise ValueError("message is required")
 
-    field_index = db_fields.index(field)
-    if field_index == -1: raise ValueError(f"Field '{field}' not found")
+    id = uuid.uuid4().hex
+    ts = int(datetime.datetime.now().timestamp())
 
-    try:
-        values = [cast_to_value(field, v) for v in values.split("\n")]
-        values = [v for v in values if v is not None]
-    except ValueError as e:
-        return error(str(e), 400)
-
-    tagged_rows = db.batch_find_by(field, values, limit=100)
-    rows = [[value_to_str(v) for v in row] for (_, row) in tagged_rows]
+    db.upsert([Value.string(id), Value.int(ts), Value.string(username), Value.string(message)])
 
     htmp_target = request.form.get("htmp") or request.args.get("htmp")
     if htmp_target:
-        return render_template("frag_results.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
-        )
+        messages = get_messages()
+        return render_template("frag_messages.html.j2", messages = messages)
     else:
-        return render_template('page_main.html.j2',
-            selected_form = "frag_form_find.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
+        return redirect("/")
+
+def get_messages():
+    messages = db.range_by("ts", Bound.unbounded(), Bound.unbounded(), limit=100, sort_asc=False)
+
+    return [
+        Message(
+            id=id.as_string(),
+            ts=datetime.datetime.fromtimestamp(ts.as_int()).isoformat(),
+            username=username.as_string(),
+            msg=msg.as_string()
         )
+        for [id, ts, username, msg] in messages
+    ]
 
-@app.post("/range")
-def query_range():
-    field = request.form.get("field")
-    if not field: raise ValueError("Field is required")
+@scheduler.task('interval', id='my_job', minutes=1)
+def run_maintenance():
+    db.do_maintenance_tasks()
 
-    from_type = request.form.get("from_type")
-    if not from_type: raise ValueError("From type is required")
-
-    to_type = request.form.get("to_type")
-    if not to_type: raise ValueError("To type is required")
-
-    field_index = db_fields.index(field)
-    if field_index == -1: raise ValueError(f"Field '{field}' not found")
-
-    match from_type:
-        case "unbounded":
-            bound_lower = Bound.unbounded()
-        case "included":
-            from_value = request.form.get("from_value")
-            try:
-                if not from_value: raise ValueError("From value is required")
-                from_value = cast_to_value(field, from_value)
-            except ValueError as e:
-                return error(str(e), 400)
-            bound_lower = Bound.included(cast(Value, from_value))
-        case "excluded":
-            from_value = request.form.get("from_value")
-            try:
-                if not from_value: raise ValueError("From value is required")
-                from_value = cast_to_value(field, from_value)
-            except ValueError as e:
-                return error(str(e), 400)
-            bound_lower = Bound.excluded(cast(Value, from_value))
-        case _:
-            return error("Invalid from type", 400)
-
-    match to_type:
-        case "unbounded":
-            bound_upper = Bound.unbounded()
-        case "included":
-            to_value = request.form.get("to_value")
-            try:
-                if not to_value: raise ValueError("To value is required")
-                to_value = cast_to_value(field, to_value)
-            except ValueError as e:
-                return error(str(e), 400)
-            bound_upper = Bound.included(cast(Value, to_value))
-        case "excluded":
-            to_value = request.form.get("to_value")
-            try:
-                if not to_value: raise ValueError("To value is required")
-                to_value = cast_to_value(field, to_value)
-            except ValueError as e:
-                return error(str(e), 400)
-            bound_upper = Bound.excluded(cast(Value, to_value))
-        case _:
-            return error("Invalid to type", 400)
-
-    tagged_rows = db.range_by(field, bound_lower, bound_upper, limit=100)
-    rows = [[value_to_str(v) for v in row] for row in tagged_rows]
-
-    htmp_target = request.form.get("htmp") or request.args.get("htmp")
-    if htmp_target:
-        return render_template("frag_results.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
-        )
-    else:
-        return render_template('page_main.html.j2',
-            selected_form = "frag_form_range.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
-        )
-
-@app.post("/delete")
-def query_delete():
-    field = request.form.get("field")
-    if not field: raise ValueError("Field is required")
-
-    value = request.form.get("value")
-    if not value: raise ValueError("Value is required")
-
-    field_index = db_fields.index(field)
-    if field_index == -1: raise ValueError(f"Field '{field}' not found")
-
-    try:
-        value = cast_to_value(field, value)
-    except ValueError as e:
-        return error(str(e), 400)
-
-    rows = db.delete_by(field, cast(Value, value))
-    rows = [[value_to_str(v) for v in row] for row in rows]
-
-    htmp_target = request.form.get("htmp") or request.args.get("htmp")
-    if htmp_target:
-        return render_template("frag_results.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
-        )
-    else:
-        return render_template('page_main.html.j2',
-            selected_form = "frag_form_delete.html.j2",
-            field_names = ["id", "name"],
-            rows = rows,
-        )
-
-
-# Utils
-
-def cast_to_value(field: str, str_value: str) -> Value | None:
-    str_value = str_value.strip()
-    if str_value == "": return None
-    if str_value[0] == "\"":
-        if str_value[-1] != "\"": raise ValueError(f"Invalid string: {str_value}")
-        str_value = str_value[1:-1]
-
-    field_index = db_fields.index(field)
-    if field_index == -1: raise ValueError(f"Field '{field}' not found")
-
-    type = db_types[field_index]
-
-    match type:
-        case "int":    return Value.int(int(str_value))
-        case "string": return Value.string(str_value)
-        case _:        raise ValueError(f"Unsupported type: {type}")
-
-def value_to_str(value: Value) -> str:
-    match value.kind():
-        case log_db.VALUE_INT:     return f"{str(value.as_int())} (int)"
-        case log_db.VALUE_STRING:  return f"\"{value.as_string()}\" (string)"
-        case log_db.VALUE_DECIMAL: return f"{value.as_decimal()} (decimal)"
-        case log_db.VALUE_BYTES:   return f"{value.as_bytes()} (bytes)"
-        case log_db.VALUE_NULL:    return "null"
-        case _:                    raise ValueError(f"Unsupported value kind: {value.kind()}")
+if __name__ == '__main__':
+    scheduler.init_app(app)
+    scheduler.start()
+    app.run()

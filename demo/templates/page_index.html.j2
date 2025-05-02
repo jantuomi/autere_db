@@ -1,0 +1,27 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+<div id="container">
+    <h2>Messages</h2>
+    {% include "frag_messages.html.j2" %}
+
+    <form id="send_form" action="/" method="post" htmp replace="messages">
+        <input required minlength="1" maxlength="20" type="text" name="username" placeholder="Username...">
+        <input required minlength="1" maxlength="140" type="text" name="message" placeholder="Message...">
+        <button type="submit">Send</button>
+    </form>
+
+    <script>
+    document.getElementById("send_form").addEventListener("submit", function(event) {
+        // add message immediately to #messages
+        const username = this.querySelector('input[name="username"]').value;
+        const message = this.querySelector('input[name="message"]').value;
+        const ts = new Date(Date.now()).toISOString().slice(0, 10);
+        const messages = document.getElementById("messages");
+        const newMessage = document.createElement("div");
+        newMessage.innerHTML = `<small>${ts}</small> <strong>${username}</strong>: ${message}`;
+        messages.prepend(newMessage);
+    });
+    </script>
+</div>
+{% endblock %}

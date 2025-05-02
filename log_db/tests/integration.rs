@@ -909,6 +909,7 @@ fn test_find_by_with_offset_and_limit() {
             &QueryParams {
                 offset: 2,
                 limit: 3,
+                sort_asc: true,
             },
         )
         .unwrap()
@@ -953,6 +954,7 @@ fn test_batch_find_by_with_offset_and_limit() {
             &QueryParams {
                 offset: 1,
                 limit: 2,
+                sort_asc: true,
             },
         )
         .unwrap()
@@ -995,6 +997,7 @@ fn test_range_by_with_offset_and_limit() {
             &QueryParams {
                 offset: 1,
                 limit: 3,
+                sort_asc: true,
             },
         )
         .unwrap()

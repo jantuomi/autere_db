@@ -1,5 +1,12 @@
 {% extends "base.html.j2" %}
 
 {% block content %}
-{% include "frag_error.html.j2" %}
+<div id="container">
+<h2>Error</h2>
+<p>An error occurred while processing your request.</p>
+
+<pre>
+{{ error }}
+</pre>
+</div>
 {% endblock %}

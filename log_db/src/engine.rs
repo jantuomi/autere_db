@@ -306,13 +306,19 @@ impl Engine {
             tagged.extend(mapped);
         }
 
+        if !params.sort_asc {
+            tagged.reverse();
+        }
         let bound_low = params.offset;
         let bound_high = (params.offset + params.limit).min(tagged.len());
         let sliced = &tagged[bound_low..bound_high];
-        let tagged_records = self.read_tagged_log_keys(sliced.into_iter())?;
+        let mut tagged_records = self.read_tagged_log_keys(sliced.into_iter())?;
 
         debug!("Read {} records", tagged_records.len());
 
+        if !params.sort_asc {
+            tagged_records.reverse();
+        }
         Ok(tagged_records)
     }
 
@@ -420,15 +426,26 @@ impl Engine {
             self.secondary_memtables[index].range(indexable_bounds)
         };
 
-        let log_key_batches: Vec<(usize, &LogKey)> =
+        let mut log_key_batches: Vec<(usize, &LogKey)> =
             log_keys.into_iter().map(|log_key| (0, log_key)).collect();
+
+        if !params.sort_asc {
+            log_key_batches.reverse();
+        }
 
         let bound_low = params.offset;
         let bound_high = (params.offset + params.limit).min(log_key_batches.len());
         let sliced = &log_key_batches[bound_low..bound_high];
         let tagged_records = self.read_tagged_log_keys(sliced.into_iter());
 
-        Ok(tagged_records?.into_iter().map(|(_, rec)| rec).collect())
+        let mut result_records: Vec<Row> =
+            tagged_records?.into_iter().map(|(_, rec)| rec).collect();
+
+        if !params.sort_asc {
+            result_records.reverse();
+        }
+
+        Ok(result_records)
     }
 
     /// Ensures that the `self.metadata_file` and `self.data_file` handles are still pointing to the correct files.

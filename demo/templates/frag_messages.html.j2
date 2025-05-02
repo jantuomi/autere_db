@@ -1,0 +1,12 @@
+{#
+Params
+    messages    List of message objects to display
+#}
+
+<div id="messages">
+    {% for m in messages %}
+    <div class="message">
+        <small>{{ m.ts }}</small> <strong>{{ m.username }}</strong>: {{ m.msg }}
+    </div>
+    {% endfor %}
+</div>

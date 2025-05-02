@@ -307,15 +307,23 @@ impl DB {
         Ok(recs.map(|rec| py_from_record(rec)))
     }
 
-    #[pyo3(signature = (field, key, offset = DEFAULT_QUERY_PARAMS.offset, limit = DEFAULT_QUERY_PARAMS.limit))]
+    #[pyo3(signature = (field, key,
+        offset = DEFAULT_QUERY_PARAMS.offset,
+        limit = DEFAULT_QUERY_PARAMS.limit,
+        sort_asc = DEFAULT_QUERY_PARAMS.sort_asc))]
     pub fn find_by(
         &mut self,
         field: PyField,
         key: &Value,
         offset: usize,
         limit: usize,
+        sort_asc: bool,
     ) -> PyResult<Vec<PyRecord>> {
-        let params = QueryParams { offset, limit };
+        let params = QueryParams {
+            offset,
+            limit,
+            sort_asc,
+        };
         let recs = self
             .db
             .find_by_with_params(&field, &key.record_value, &params)
@@ -324,15 +332,23 @@ impl DB {
         Ok(recs.into_iter().map(|rec| py_from_record(rec)).collect())
     }
 
-    #[pyo3(signature = (field, keys, offset = DEFAULT_QUERY_PARAMS.offset, limit = DEFAULT_QUERY_PARAMS.limit))]
+    #[pyo3(signature = (field, keys,
+        offset = DEFAULT_QUERY_PARAMS.offset,
+        limit = DEFAULT_QUERY_PARAMS.limit,
+        sort_asc = DEFAULT_QUERY_PARAMS.sort_asc))]
     pub fn batch_find_by(
         &mut self,
         field: PyField,
         keys: Vec<Value>,
         offset: usize,
         limit: usize,
+        sort_asc: bool,
     ) -> PyResult<Vec<(usize, PyRecord)>> {
-        let params = QueryParams { offset, limit };
+        let params = QueryParams {
+            offset,
+            limit,
+            sort_asc,
+        };
         let keys: Vec<log_db::Value> = keys.into_iter().map(|key| key.record_value).collect();
         let recs = self
             .db
@@ -345,7 +361,10 @@ impl DB {
             .collect())
     }
 
-    #[pyo3(signature = (field, start, end, offset = DEFAULT_QUERY_PARAMS.offset, limit = DEFAULT_QUERY_PARAMS.limit))]
+    #[pyo3(signature = (field, start, end,
+        offset = DEFAULT_QUERY_PARAMS.offset,
+        limit = DEFAULT_QUERY_PARAMS.limit,
+        sort_asc = DEFAULT_QUERY_PARAMS.sort_asc))]
     pub fn range_by(
         &mut self,
         field: PyField,
@@ -353,8 +372,13 @@ impl DB {
         end: &PyRangeBound,
         offset: usize,
         limit: usize,
+        sort_asc: bool,
     ) -> PyResult<Vec<PyRecord>> {
-        let params = QueryParams { offset, limit };
+        let params = QueryParams {
+            offset,
+            limit,
+            sort_asc,
+        };
         let range = OwnedBounds::new(
             match start {
                 PyRangeBound::Unbounded() => StdBound::Unbounded,

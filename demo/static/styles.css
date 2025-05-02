@@ -31,16 +31,13 @@ body {
     line-height: 24px;
 }
 
-#container {
+#messages {
+    max-height: 60vh;
+    overflow-y: scroll;
+    border: 1px solid black;
+    padding: 8px;
     display: flex;
-    flex-flow: row wrap;
-    justify-content: space-between;
-    align-items: flex-start;
-}
-
-a,
-.contrast {
-    color: var(--blue);
+    flex-direction: column-reverse;
 }
 
 h1 {
@@ -76,65 +73,4 @@ input[type="submit"] {
     color: var(--white);
 
     margin-top: 20px;
-}
-
-button.link,
-input[type="submit"].link {
-    background: none;
-    color: var(--blue);
-    padding: 0;
-    margin: 0;
-    text-decoration: underline;
-    font-family: "Inclusive Sans";
-}
-
-button.red,
-input[type="submit"].red {
-    background-color: var(--red);
-}
-
-button.blue,
-input[type="submit"].blue {
-    background-color: var(--blue);
-}
-
-button.yellow,
-input[type="submit"].yellow {
-    background-color: var(--yellow);
-}
-
-input[type="text"],
-input[type*="date"] {
-    font-size: 16px;
-    color: var(--black);
-}
-
-input[type="text"]:disabled,
-input[type*="date"]:disabled {
-    color: var(--gray);
-}
-
-aside {
-    width: 250px;
-}
-
-main {
-    flex: 1;
-    overflow-y: scroll;
-    max-height: 100%;
-}
-
-table {
-    width: 100%;
-}
-
-th,
-td {
-    min-width: 100px;
-    text-align: left;
-    padding: 7px 5px;
-}
-
-tr:nth-of-type(odd) td {
-    background-color: var(--light-gray-2);
 }
