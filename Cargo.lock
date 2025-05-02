@@ -85,6 +85,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "autere_db"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "ctor",
+ "env_logger",
+ "fs2",
+ "log",
+ "once_cell",
+ "rand",
+ "rust_decimal",
+ "serial_test",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -609,24 +627,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04cbf5b083de1c7e0222a7a51dbfdba1cbe1c6ab0b15e29fff3f6c077fd9cd9f"
 
 [[package]]
-name = "log_db"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "ctor",
- "env_logger",
- "fs2",
- "log",
- "once_cell",
- "rand",
- "rust_decimal",
- "serial_test",
- "tempfile",
- "thiserror",
- "uuid",
-]
-
-[[package]]
 name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -782,7 +782,7 @@ dependencies = [
 name = "py_bindings"
 version = "0.1.0"
 dependencies = [
- "log_db",
+ "autere_db",
  "pyo3",
  "rust_decimal",
 ]

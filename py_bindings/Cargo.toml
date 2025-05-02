@@ -7,6 +7,6 @@ edition = "2021"
 crate-type = ["lib"]
 
 [dependencies]
-log_db = { path = "../log_db" }
+autere_db = { path = "../autere_db" }
 pyo3 = "0.22.3"
 rust_decimal = { version = "1.36.0", features = [] }

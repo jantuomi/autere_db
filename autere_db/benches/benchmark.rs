@@ -2,8 +2,8 @@ mod utils;
 
 use std::collections::HashSet;
 
+use autere_db::*;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use log_db::*;
 use tempfile;
 use utils::*;
 

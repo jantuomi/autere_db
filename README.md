@@ -1,8 +1,8 @@
-# LogDB
+# AutereDB
 
-An educational endeavor in implementing a log-structured database with a focus on simplicity, understandability and performance.
+AutereDB is an educational endeavor in implementing a log-structured database engine with a focus on simplicity, understandability and performance.
 
-LogDB has the following features:
+AutereDB has the following features:
 
 - Log-structured single-table storage, based on a durable append-only log
 - In-memory indexes for fast lookups (primary and secondary)
@@ -13,37 +13,37 @@ LogDB has the following features:
 - Transactions based on eager exclusive locking
 - Batch read operations for improved performance
 
-LogDB does not support:
+AutereDB does not support:
 
 - Authentication or authorization in any capacity
 - Multiple tables
 - Type checking or schema evolution. These are outsourced to the application layer.
 
-See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation of LogDB.
+For production workloads, AutereDB would benefit from a porcelain layer that provides features such as query language, networking, and monitoring. AutereDB does not come with such a layer. See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation.
 
 ## Inspiration
 
-The most significant sources of inspiration for LogDB are:
+The most significant sources of inspiration for AutereDB are:
 
 - [SQLite](https://www.sqlite.org/index.html) for its filesystem storage and
   locking mechanisms.
 - [Designing Data-Intensive Applications (book)](https://www.oreilly.com/library/view/designing-data-intensive-applications/9781491903063/)
   for its excellent overview of database internals and in-depth analysis of log-structured storage.
-  LogDB is heavily based on the design outlined in chapter 3.
+  AutereDB is heavily based on the design outlined in chapter 3.
 
 ## Usage in Rust
 
-Add LogDB as a dependency in your `Cargo.toml`.
+Add AutereDB as a dependency in your `Cargo.toml`.
 
 ```toml
 [dependencies]
-log_db = { git = "https://github.com/jantuomi/log_db.git" }
+autere_db = { git = "https://github.com/jantuomi/autere_db.git" }
 ```
 
 Then use it in your code like so:
 
 ```rust
-use log_db::*;
+use autere_db::*;
 
 // Define a type that represents your fields (columns)
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -170,4 +170,4 @@ db.upsert([Value.int(10)])
 
 ## Copyright and license
 
-LogDB is licensed under the Apache License, Version 2.0. © 2024 Jan Tuomi.
+AutereDB is licensed under the Apache License, Version 2.0. © 2024 Jan Tuomi.

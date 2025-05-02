@@ -1,4 +1,4 @@
-use log_db::*;
+use autere_db::*;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::fmt::Debug;

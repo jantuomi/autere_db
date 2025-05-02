@@ -3,9 +3,9 @@ extern crate log;
 extern crate ctor;
 extern crate tempfile;
 
+use autere_db::*;
 use ctor::ctor;
 use env_logger;
-use log_db::*;
 use serial_test::serial;
 use std::fs::{self};
 use std::path::Path;

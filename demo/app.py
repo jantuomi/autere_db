@@ -13,7 +13,7 @@ import datetime
 from dataclasses import dataclass
 
 import uuid
-from log_db import DB, Bound, Value
+from autere_db import DB, Bound, Value
 
 app = Flask(__name__)
 Compress(app)

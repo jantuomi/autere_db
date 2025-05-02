@@ -1,8 +1,8 @@
 import tempfile
 from pprint import pformat, pprint
-from log_db import Value, Bound, DB
+from autere_db import Value, Bound, DB
 
-# TODO: This should be imported from the log_db module
+# TODO: This should be imported from the autere_db module
 # but exporting type aliases does not work automatically
 Record = list[Value]
 
@@ -40,7 +40,7 @@ db = DB \
 
 db.upsert(Inst(1, "foo").into_record())
 
-#res = db.find_by("name", log_db.Value.string("foo"))
+#res = db.find_by("name", autere_db.Value.string("foo"))
 #insts = [Inst.from_record(r) for r in res]
 res = db.range_by("name",
     Bound.unbounded(),

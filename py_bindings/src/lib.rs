@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::usize;
 
-use log_db::{self, OwnedBounds, QueryParams, Record, DEFAULT_QUERY_PARAMS};
+use autere_db::{self, OwnedBounds, QueryParams, Record, DEFAULT_QUERY_PARAMS};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use rust_decimal::Decimal;
@@ -20,8 +20,8 @@ pub const READ_CONSISTENCY_STRONG: u8 = 1;
 struct Config {
     data_dir: Option<PyField>,
     segment_size: Option<usize>,
-    write_durability: Option<log_db::WriteDurability>,
-    read_consistency: Option<log_db::ReadConsistency>,
+    write_durability: Option<autere_db::WriteDurability>,
+    read_consistency: Option<autere_db::ReadConsistency>,
     fields: Option<Vec<PyField>>,
     primary_key: Option<PyField>,
     secondary_keys: Option<Vec<PyField>>,
@@ -50,8 +50,8 @@ impl Config {
         write_durability: u8,
     ) -> PyResult<PyRefMut<'a, Self>> {
         slf.write_durability = Some(match write_durability {
-            WRITE_DURABILITY_FLUSH => log_db::WriteDurability::Flush,
-            WRITE_DURABILITY_FLUSH_SYNC => log_db::WriteDurability::FlushSync,
+            WRITE_DURABILITY_FLUSH => autere_db::WriteDurability::Flush,
+            WRITE_DURABILITY_FLUSH_SYNC => autere_db::WriteDurability::FlushSync,
             _ => {
                 return Err(PyException::new_err(format!(
                     "Invalid write_durability value: {}",
@@ -67,8 +67,8 @@ impl Config {
         read_consistency: u8,
     ) -> PyResult<PyRefMut<'a, Self>> {
         slf.read_consistency = Some(match read_consistency {
-            READ_CONSISTENCY_EVENTUAL => log_db::ReadConsistency::Eventual,
-            READ_CONSISTENCY_STRONG => log_db::ReadConsistency::Strong,
+            READ_CONSISTENCY_EVENTUAL => autere_db::ReadConsistency::Eventual,
+            READ_CONSISTENCY_STRONG => autere_db::ReadConsistency::Strong,
             _ => {
                 return Err(PyException::new_err(format!(
                     "Invalid read_consistency value: {}",
@@ -104,7 +104,7 @@ impl Config {
     }
 
     pub fn initialize(&self) -> PyResult<DB> {
-        let mut config = log_db::DB::configure();
+        let mut config = autere_db::DB::configure();
         if self.data_dir.is_some() {
             config = config.data_dir(&self.data_dir.as_ref().unwrap().to_string());
         }
@@ -157,7 +157,7 @@ fn py_into_record(record: Vec<Value>) -> Record {
     record
         .into_iter()
         .map(|value| value.record_value)
-        .collect::<Vec<log_db::Value>>()
+        .collect::<Vec<autere_db::Value>>()
         .into()
 }
 
@@ -170,34 +170,34 @@ const VALUE_NULL: u8 = 4;
 #[pyclass]
 #[derive(Clone, PartialEq, Eq)]
 pub struct Value {
-    record_value: log_db::Value,
+    record_value: autere_db::Value,
 }
 
 #[pymethods]
 impl Value {
     fn __repr__(&self) -> String {
         match &self.record_value {
-            log_db::Value::Int(value) => format!("Value.int({})", value),
-            log_db::Value::Decimal(value) => format!("Value.decimal({})", value),
-            log_db::Value::String(value) => {
+            autere_db::Value::Int(value) => format!("Value.int({})", value),
+            autere_db::Value::Decimal(value) => format!("Value.decimal({})", value),
+            autere_db::Value::String(value) => {
                 format!("Value.string(\"{}\")", value.replace("\"", "\\\""))
             }
-            log_db::Value::Bytes(value) => format!("Value.bytes({:?})", value),
-            log_db::Value::Null => "Value.null()".to_string(),
+            autere_db::Value::Bytes(value) => format!("Value.bytes({:?})", value),
+            autere_db::Value::Null => "Value.null()".to_string(),
         }
     }
 
     #[staticmethod]
     fn int(value: i64) -> Self {
         Value {
-            record_value: log_db::Value::Int(value),
+            record_value: autere_db::Value::Int(value),
         }
     }
 
     #[staticmethod]
     fn decimal(value: String) -> Self {
         Value {
-            record_value: log_db::Value::Decimal(
+            record_value: autere_db::Value::Decimal(
                 Decimal::from_str(&value).expect(&format!("Invalid Decimal: {}", value)),
             ),
         }
@@ -206,65 +206,65 @@ impl Value {
     #[staticmethod]
     fn string(value: String) -> Self {
         Value {
-            record_value: log_db::Value::String(value),
+            record_value: autere_db::Value::String(value),
         }
     }
 
     #[staticmethod]
     fn bytes(value: &[u8]) -> Self {
         Value {
-            record_value: log_db::Value::Bytes(value.to_vec()),
+            record_value: autere_db::Value::Bytes(value.to_vec()),
         }
     }
 
     #[staticmethod]
     fn null() -> Self {
         Value {
-            record_value: log_db::Value::Null,
+            record_value: autere_db::Value::Null,
         }
     }
 
     pub fn kind(&self) -> u8 {
         match &self.record_value {
-            log_db::Value::Int(_) => VALUE_INT,
-            log_db::Value::Decimal(_) => VALUE_DECIMAL,
-            log_db::Value::String(_) => VALUE_STRING,
-            log_db::Value::Bytes(_) => VALUE_BYTES,
-            log_db::Value::Null => VALUE_NULL,
+            autere_db::Value::Int(_) => VALUE_INT,
+            autere_db::Value::Decimal(_) => VALUE_DECIMAL,
+            autere_db::Value::String(_) => VALUE_STRING,
+            autere_db::Value::Bytes(_) => VALUE_BYTES,
+            autere_db::Value::Null => VALUE_NULL,
         }
     }
 
     pub fn as_int(&self) -> PyResult<i64> {
         match &self.record_value {
-            log_db::Value::Int(value) => Ok(*value),
+            autere_db::Value::Int(value) => Ok(*value),
             _ => Err(PyException::new_err("Value is not an Int")),
         }
     }
 
     pub fn as_decimal(&self) -> PyResult<String> {
         match &self.record_value {
-            log_db::Value::Decimal(value) => Ok(value.to_string()),
+            autere_db::Value::Decimal(value) => Ok(value.to_string()),
             _ => Err(PyException::new_err("Value is not a Decimal")),
         }
     }
 
     pub fn as_string(&self) -> PyResult<String> {
         match &self.record_value {
-            log_db::Value::String(value) => Ok(value.clone()),
+            autere_db::Value::String(value) => Ok(value.clone()),
             _ => Err(PyException::new_err("Value is not a String")),
         }
     }
 
     pub fn as_bytes(&self) -> PyResult<Vec<u8>> {
         match &self.record_value {
-            log_db::Value::Bytes(value) => Ok(value.clone()),
+            autere_db::Value::Bytes(value) => Ok(value.clone()),
             _ => Err(PyException::new_err("Value is not Bytes")),
         }
     }
 
     pub fn as_null(&self) -> PyResult<()> {
         match &self.record_value {
-            log_db::Value::Null => Ok(()),
+            autere_db::Value::Null => Ok(()),
             _ => Err(PyException::new_err("Value is not Null")),
         }
     }
@@ -272,7 +272,7 @@ impl Value {
 
 #[pyclass]
 struct DB {
-    db: log_db::DB,
+    db: autere_db::DB,
 }
 
 #[pymethods]
@@ -349,7 +349,7 @@ impl DB {
             limit,
             sort_asc,
         };
-        let keys: Vec<log_db::Value> = keys.into_iter().map(|key| key.record_value).collect();
+        let keys: Vec<autere_db::Value> = keys.into_iter().map(|key| key.record_value).collect();
         let recs = self
             .db
             .batch_find_by_with_params(&field, &keys, &params)
@@ -480,7 +480,7 @@ impl PyRangeBound {
     }
 }
 
-#[pymodule(name = "log_db")]
+#[pymodule(name = "autere_db")]
 fn log_db_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DB>()?;
     m.add_class::<Value>()?;
