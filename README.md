@@ -31,6 +31,12 @@ The most significant sources of inspiration for AutereDB are:
   for its excellent overview of database internals and in-depth analysis of log-structured storage.
   AutereDB is heavily based on the design outlined in chapter 3.
 
+## In this repository
+
+- `autere_db`: The core Rust library
+- `py_bindings`: Python bindings for the Rust library API
+- `demo`: A simple Python chat app that demonstrates the usage of AutereDB
+
 ## Usage in Rust
 
 Add AutereDB as a dependency in your `Cargo.toml`.
@@ -41,6 +47,45 @@ autere_db = { git = "https://github.com/jantuomi/autere_db.git" }
 ```
 
 Then use it in your code like so:
+
+```rust
+fn example() -> DBResult<()> {
+  // Initialize the database
+  let mut db = DB::configure()
+    // Set the directory where the database files are stored.
+    .data_dir("data")
+
+    // Select the database fields, i.e. columns.
+    .fields(vec![Field::Id, Field::Name])
+
+    // Select the primary key field.
+    .primary_key(Field::Id)
+
+    // Select the secondary key fields. All queries must be
+    // based on the primary key or secondary keys.
+    .secondary_keys(vec![Field::Name])
+
+    // Define the conversion functions between the data type and database values.
+    .from_record(Inst::from_record)
+    .into_record(Inst::into_record)
+
+    // Finish the builder pattern and initialize the database.
+    .initialize()?;
+
+  // Insert or update the record based on the primary key
+  db.upsert(Inst {
+    id: 1,
+    name: Some("Alice".to_string()),
+  })?;
+
+  // Get the record by primary key
+  let found = db.get(&Value::Int(1))?;
+
+  ...
+}
+```
+
+With `Inst` etc. being defined like so:
 
 ```rust
 use autere_db::*;
@@ -88,41 +133,6 @@ impl Inst {
     assert_eq!(it.next(), None);
     inst
   }
-}
-
-fn example() -> DBResult<()> {
-  // Initialize the database
-  let mut db = DB::configure()
-    // Set the directory where the database files are stored.
-    .data_dir("data")
-
-    // Select the database fields, i.e. columns.
-    .fields(vec![Field::Id, Field::Name])
-
-    // Select the primary key field.
-    .primary_key(Field::Id)
-
-    // Select the secondary key fields. All queries must be
-    // based on the primary key or secondary keys.
-    .secondary_keys(vec![Field::Name])
-
-    // Define the conversion functions between the data type and database values.
-    .from_record(Inst::from_record)
-    .into_record(Inst::into_record)
-
-    // Finish the builder pattern and initialize the database.
-    .initialize()?;
-
-  // Insert or update the record based on the primary key
-  db.upsert(Inst {
-    id: 1,
-    name: Some("Alice".to_string()),
-  })?;
-
-  // Get the record by primary key
-  let found = db.get(&Value::Int(1))?;
-
-  ...
 }
 ```
 
