@@ -166,7 +166,7 @@ maturin build --release     # for the release version
 Then you can use the Python bindings like so:
 
 ```python
-from log_db_py import DB, Value, Record
+from autere_db import DB, Value, Record
 
 config = DB.configure() \
     .data_dir("data") \
@@ -176,6 +176,10 @@ config = DB.configure() \
     .initialize()
 
 db.upsert([Value.int(10)])
+
+# You can unwrap a database value like so:
+db_value = Value.string("foo")
+python_value = db_value.as_string()
 ```
 
 ## Copyright and license
