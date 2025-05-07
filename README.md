@@ -19,7 +19,7 @@ AutereDB does not support:
 - Multiple tables
 - Type checking or schema evolution. These are outsourced to the application layer.
 
-For production workloads, AutereDB would benefit from a porcelain layer that provides features such as query language, networking, and monitoring. AutereDB does not come with such a layer. See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation.
+AutereDB would benefit from a porcelain layer that provides features such as a query language, networking, and monitoring. AutereDB does not come with such a layer. See the [ARCHITECTURE.md](ARCHITECTURE.md) document for more details on the design and implementation.
 
 ## Inspiration
 
@@ -175,7 +175,7 @@ config = DB.configure() \
     .secondary_keys(["name"]) \
     .initialize()
 
-db.upsert([Value.int(10)])
+db.upsert([Value.int(10), Value.string("foo")])
 
 # You can unwrap a database value like so:
 db_value = Value.string("foo")
